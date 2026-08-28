@@ -33,6 +33,13 @@ PRICE_PHRASE_RE = re.compile(
 # The customer's reply shapes. Matching these is how a question turns into evidence.
 DISCLOSURE_RE = re.compile(r"what matters is:\s*(.+?)\s*$", re.IGNORECASE)
 OVERRIDE_RE = re.compile(r"what I need is:\s*(.+?)\s*$", re.IGNORECASE)
+# One disclosure often carries several independent constraints, joined with ";". Ranking
+# needs them apart, because a phrase only means something if it stays intact.
+PHRASE_SPLIT_RE = re.compile(r"[;.]")
+# Conversational scaffolding wrapped around the constraint itself. Stripping it keeps the
+# phrase matchable against product text; note that "label: value" prefixes are deliberately
+# *not* stripped, since the catalog renders its own detail dicts as "label value" too.
+LEAD_IN_RE = re.compile(r"^(?:i'?m\s+)?looking for\s+|^a\s+key\s+requirement\s+is:\s*", re.IGNORECASE)
 # "an additional preference" means the attribute is genuinely empty -- stop asking it.
 EXHAUSTED_RE = re.compile(r"don't have an additional preference for (\w+)", re.IGNORECASE)
 # "a preference" (no "additional") is the boundary customer deferring to us once. That is
@@ -71,6 +78,16 @@ QUESTIONS = {
 }
 
 
+def phrase_units(text: str) -> list[str]:
+    """Split one customer utterance into the separate things it actually claims."""
+    units = []
+    for part in PHRASE_SPLIT_RE.split(text):
+        cleaned = LEAD_IN_RE.sub("", part.strip()).strip()
+        if cleaned:
+            units.append(cleaned)
+    return units
+
+
 def detect_constraints(message: str) -> dict[str, float | str | None]:
     color_match = COLOR_RE.search(message)
     material_match = MATERIAL_RE.search(message)
@@ -88,6 +105,9 @@ class DialogState:
     def __init__(self) -> None:
         self.slots: dict[str, float | str | None] = {slot: None for slot in SLOTS}
         self.evidence: list[str] = []
+        # The same disclosures as `evidence`, but broken into individual claims and kept
+        # in utterance order. Retrieval wants a bag of terms; ranking wants the phrases.
+        self.phrases: list[str] = []
         self.exhausted: set[str] = set()
 
     def observe(self, message: str, turn: int) -> None:
@@ -103,6 +123,7 @@ class DialogState:
             # The opener carries the product category, which is the single most useful
             # retrieval signal in the whole session. Keep all of it.
             self.evidence.append(message)
+            self.phrases.extend(phrase_units(message))
             return
 
         exhausted = EXHAUSTED_RE.search(message)
@@ -118,6 +139,7 @@ class DialogState:
         disclosure = DISCLOSURE_RE.search(message) or OVERRIDE_RE.search(message)
         if disclosure:
             self.evidence.append(disclosure.group(1))
+            self.phrases.extend(phrase_units(disclosure.group(1)))
 
         # Anything else (e.g. the "ask me about one specific attribute" nudge) carries no
         # information about the target and is deliberately not accumulated.
@@ -132,6 +154,10 @@ class DialogState:
     def evidence_text(self) -> str:
         """Everything the customer has revealed, oldest first."""
         return " ".join(self.evidence)
+
+    def evidence_phrases(self) -> list[str]:
+        """The same disclosures as separate claims, for phrase-level reranking."""
+        return list(self.phrases)
 
     @property
     def is_buying(self) -> bool:

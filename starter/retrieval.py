@@ -11,6 +11,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
+from typing import Callable
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -22,6 +23,30 @@ STOPWORDS = {
 
 OVERFETCH_MULT = 5
 CATEGORY_ROUTE_WEIGHT = 0.3
+
+# How many fused candidates a reranker gets to reorder. Bigger pools give the reranker
+# more chances to rescue a buried target, but every extra candidate is also a chance to
+# displace one the fusion already had right. Measured: 30 -> 0.806, 60 -> 0.845,
+# 120 -> 0.848, 200 -> 0.842, 300 -> 0.841. Everything from 60 up is one flat plateau
+# inside the noise floor; the falloff past 200 is real.
+RERANK_POOL = 120
+
+# Text columns, in table order, paired with how diagnostic a term found there is. Used
+# only by reranking; FTS5's own ordering uses BM25_WEIGHTS above.
+TEXT_COLUMNS = ("title", "categories", "features", "details", "store", "description")
+FIELD_FACTORS = {
+    "title": 1.0,
+    "categories": 0.9,
+    "features": 0.85,
+    "details": 0.85,
+    "store": 0.7,
+    "description": 0.65,
+}
+
+# Profiles are cached because the same candidates recur turn after turn inside a session.
+# Caching all 50k would duplicate the whole catalog in memory, so the cache is dropped
+# wholesale once it grows past a pool's worth of sessions.
+MAX_PROFILE_CACHE = 20_000
 
 # BM25 column weights, in table order: parent_asin, title, categories, features,
 # details, store, description, price. A product's title is far more diagnostic of
@@ -40,15 +65,22 @@ def flatten(value: object) -> str:
     return str(value)
 
 
+def tokens(text: str) -> list[str]:
+    """Tokenize and drop stopwords, keeping order *and* repeats.
+
+    Reranking matches phrases against documents by token sequence, so unlike `terms`
+    this must not collapse duplicates -- doing so would silently rewrite the text.
+    """
+    return [
+        token.lower()
+        for token in TOKEN_RE.findall(text)
+        if len(token) > 1 and token.lower() not in STOPWORDS
+    ]
+
+
 def terms(text: str) -> list[str]:
     """Tokenize, drop stopwords and single characters, preserving first-seen order."""
-    return list(
-        dict.fromkeys(
-            token.lower()
-            for token in TOKEN_RE.findall(text)
-            if len(token) > 1 and token.lower() not in STOPWORDS
-        )
-    )
+    return list(dict.fromkeys(tokens(text)))
 
 
 def with_and_terms(expression: str, and_terms: list[str]) -> str:
@@ -73,6 +105,10 @@ class CatalogIndex:
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
+        self.rowid_by_asin: dict[str, int] = {}
+        self.document_count = 0
+        self._profile_cache: dict[str, tuple[dict[str, float], str]] = {}
+        self._document_frequency_cache: dict[str, int] = {}
         self._build_index()
 
     def _build_index(self) -> None:
@@ -105,6 +141,69 @@ class CatalogIndex:
         if batch:
             cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?, ?)", batch)
         self.connection.commit()
+
+        # FTS5 ships its own term statistics. `fts5vocab ... 'row'` exposes, per term, the
+        # number of documents containing it -- exactly the document frequency reranking
+        # needs for IDF, at the cost of an index lookup instead of a counting search.
+        cursor.execute("CREATE VIRTUAL TABLE vocabulary USING fts5vocab(products, 'row')")
+
+        # `parent_asin` is UNINDEXED, so looking a product up by it would mean scanning all
+        # 50k rows. Mapping it to the rowid once turns every later fetch into a primary-key
+        # hit, which is what makes per-candidate reranking affordable.
+        self.rowid_by_asin = {
+            str(parent_asin): int(rowid)
+            for rowid, parent_asin in self.connection.execute(
+                "SELECT rowid, parent_asin FROM products"
+            )
+        }
+        self.document_count = len(self.rowid_by_asin)
+
+    def document_frequency(self, term: str) -> int:
+        """How many catalog products contain `term` anywhere."""
+        cached = self._document_frequency_cache.get(term)
+        if cached is None:
+            row = self.connection.execute(
+                "SELECT doc FROM vocabulary WHERE term = ?", (term,)
+            ).fetchone()
+            cached = int(row[0]) if row else 0
+            self._document_frequency_cache[term] = cached
+        return cached
+
+    def document_profile(self, parent_asin: str) -> tuple[dict[str, float], str]:
+        """`(term -> best field factor, the whole document as a token string)`.
+
+        The token string is space-joined and space-padded so testing whether a phrase
+        occurs in the product is a plain substring search that still respects token
+        boundaries -- far cheaper than walking tokens per candidate per turn.
+        """
+        cached = self._profile_cache.get(parent_asin)
+        if cached is not None:
+            return cached
+
+        rowid = self.rowid_by_asin.get(parent_asin)
+        if rowid is None:
+            return {}, " "
+        columns = ", ".join(TEXT_COLUMNS)
+        row = self.connection.execute(
+            f"SELECT {columns} FROM products WHERE rowid = ?", (rowid,)
+        ).fetchone()
+        if row is None:
+            return {}, " "
+
+        factors: dict[str, float] = {}
+        sequence: list[str] = []
+        for column, value in zip(TEXT_COLUMNS, row):
+            factor = FIELD_FACTORS[column]
+            for token in tokens(str(value or "")):
+                sequence.append(token)
+                if factor > factors.get(token, 0.0):
+                    factors[token] = factor
+        profile = (factors, f" {' '.join(sequence)} ")
+
+        if len(self._profile_cache) >= MAX_PROFILE_CACHE:
+            self._profile_cache.clear()
+        self._profile_cache[parent_asin] = profile
+        return profile
 
     def run_ranked_query(
         self, match_expression: str, price_max: float | None, limit: int
@@ -142,12 +241,16 @@ class CatalogIndex:
         and_terms: list[str],
         price_max: float | None,
         top_k: int,
+        reranker: Callable[[list[str]], list[str]] | None = None,
     ) -> list[dict]:
         base_expression = or_expression(query_terms)
         if not base_expression:
             return []
 
-        limit = top_k * OVERFETCH_MULT
+        # With a reranker attached, fusion stops being the final word and becomes a
+        # candidate generator: it hands over a pool several times longer than the answer.
+        pool_k = max(top_k, RERANK_POOL) if reranker else top_k
+        limit = pool_k * OVERFETCH_MULT
 
         # Route 1: keyword route — whole-catalog BM25 search.
         keyword_ids = self.run_ranked_query(
@@ -162,18 +265,26 @@ class CatalogIndex:
         )
 
         merged = self.fuse_rankings(
-            [(keyword_ids, 1.0), (category_ids, CATEGORY_ROUTE_WEIGHT)], top_k
+            [(keyword_ids, 1.0), (category_ids, CATEGORY_ROUTE_WEIGHT)], pool_k
         )
 
         # Safety net: if hard filters (buying track) narrowed things too far, backfill
         # from an unfiltered wide search rather than returning too few recommendations.
-        if len(merged) < top_k:
+        if len(merged) < pool_k:
             seen = set(merged)
             for parent_asin in self.run_ranked_query(base_expression, None, limit):
                 if parent_asin not in seen:
                     seen.add(parent_asin)
                     merged.append(parent_asin)
-                if len(merged) >= top_k:
+                if len(merged) >= pool_k:
                     break
+
+        if reranker is not None:
+            try:
+                merged = reranker(merged)
+            except Exception:
+                # A reranker fault must cost us ordering, never the whole session: the
+                # evaluator scores any raised exception as an outright miss.
+                pass
 
         return [{"parent_asin": parent_asin} for parent_asin in merged[:top_k]]

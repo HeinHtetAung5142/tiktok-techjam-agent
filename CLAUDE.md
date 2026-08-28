@@ -39,17 +39,22 @@ Metrics are also reported per scenario — always read the breakdown, not just t
 
 ### Score of record
 
-| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_clarification.json`) |
+| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_reranking.json`) |
 |---|---|---|
-| HitRate@10 | 0.125 | 0.825 |
-| MRR | 0.068034 | 0.420141 |
-| MTTC | 9.81 | 3.85 |
-| **TechnicalScore** | **0.10671** | **0.681542** |
+| HitRate@10 | 0.125 | 0.965 |
+| MRR | 0.068034 | 0.652067 |
+| MTTC | 9.81 | 2.53 |
+| **TechnicalScore** | **0.10671** | **0.84752** |
 
-Per scenario, current: boundary 0.9 · browsing 0.8625 · intent_override 0.8 · buying 0.7875.
+Per scenario HitRate@10, current: boundary 1.0 · browsing 0.9875 · intent_override 0.9667 ·
+buying 0.9375.
 
-**MRR is now the weak term.** HitRate@10 is 0.825 while MRR is 0.420 — targets are being found and
-then buried mid-list. Reranking is where the remaining points are.
+**MRR is still the weak term, but it is no longer the cheap one.** HitRate@10 is 0.965 against an
+MRR of 0.652, so the target is almost always in the list and usually near the top. Of the 7
+remaining misses, 6 are targets whose disclosed constraints are pure boilerplate ("100% Cotton;
+Imported; Button closure") shared with thousands of products — no lexical method can separate
+those. Further gains need dense retrieval, or they need the turn budget and the untouched
+`user_profile`.
 
 ## Commands
 
@@ -63,8 +68,9 @@ py tools/score_delta.py <before.json> <after.json>   # markdown delta table for 
 Store stub and fail; `py` is the real launcher (Python 3.12.0). The organizer README says `python3`
 because it assumes Linux — our submission instructions must cover both.
 
-A full run takes roughly a minute: the FTS5 index over all 50k products is rebuilt on `Agent()`
-construction, then 200 sessions replay against it.
+A full run takes roughly 15 seconds: the FTS5 index over all 50k products is rebuilt on `Agent()`
+construction, then 200 sessions replay against it. It was ~60s before reranking landed — sessions
+now end sooner because the target surfaces earlier.
 
 `requirements.txt` is currently **empty** — the agent is pure standard library. Anything added must
 be pinned there, or the organizer cannot reproduce the run.
@@ -94,13 +100,13 @@ These are competition constraints, not style preferences. Violating them invalid
 
 ## Architecture
 
-Three modules, no third-party deps, no network:
+Four modules, no third-party deps, no network:
 
 ```text
 starter/agent.py         orchestration + the official reset()/respond() contract
 starter/retrieval.py     FTS5 index, query routes, RRF fusion
 starter/dialog_state.py  per-session slots, evidence accumulation, question policy
-starter/ranking.py       NOT YET WRITTEN -- the agreed home for reranking + personalization
+starter/ranking.py       IDF coverage + phrase reranking over the fused candidate pool
 ```
 
 Keep the contract surface in `agent.py`; everything else is imported.
@@ -124,8 +130,14 @@ Keep the contract surface in `agent.py`; everything else is imported.
   a `categories`-column-only route (so a strong category signal isn't diluted by noisy
   title/description scores). `_fuse_rankings` merges them with weighted **Reciprocal Rank Fusion**
   (`weight / (60 + rank)`), keyword at `1.0` and category at `0.3`.
-- **Backfill.** If hard filters narrow the pool below `top_k`, an unfiltered wide search tops it up
-  rather than returning a short list.
+- **Reranking.** Fusion no longer decides the final order; it generates a pool of
+  `RERANK_POOL` (120) candidates and `Reranker.order` reorders them. The score is half IDF-weighted
+  term coverage (discounted by which field matched) and half intact-phrase matching, on the premise
+  that a shopper quotes the language of the product they want. Blending the fused BM25 order back in
+  as a prior was measured and **removed** — it cost 0.03–0.04 TechnicalScore. Fusion still picks the
+  pool and breaks ties.
+- **Backfill.** If hard filters narrow the pool below the pool size, an unfiltered wide search tops
+  it up rather than returning a short list.
 
 ### Reuse these — don't rewrite them
 
@@ -137,6 +149,11 @@ Keep the contract surface in `agent.py`; everything else is imported.
 | `terms` / `or_expression` / `with_and_terms` | retrieval.py | tokenizing and FTS5 expression building |
 | `detect_constraints` | dialog_state.py | color / material / price-ceiling regex extraction |
 | `DialogState.evidence_text` | dialog_state.py | everything the customer has revealed, oldest first |
+| `DialogState.evidence_phrases` | dialog_state.py | the same disclosures split into individual claims |
+| `CatalogIndex.document_profile` | retrieval.py | cached `(term -> field factor, token string)` per product |
+| `CatalogIndex.document_frequency` | retrieval.py | document frequency from FTS5's own `fts5vocab` table |
+| `Reranker.order` | ranking.py | reorders a candidate pool against the customer's own phrasing |
+| `tokens` | retrieval.py | tokenizing that keeps order *and* duplicates (`terms` dedupes) |
 
 ## How scoring actually behaves
 
@@ -176,18 +193,15 @@ not survive that; modelling "ask a targeted question, absorb the answer into sta
 
 ## Known gaps (highest leverage first)
 
-1. **No reranking.** Whatever RRF emits is the final order. With HitRate@10 at 0.825 and MRR at
-   0.420, targets are being found and then buried mid-list — this is now the biggest single pot of
-   points on the board (MRR is 30% of the score).
-2. **Turns are wasted once evidence runs dry.** Around turn 4–5 the agent typically exhausts every
+1. **Turns are wasted once evidence runs dry.** Around turn 4–5 the agent typically exhausts every
    attribute and spends the rest of the session asking dead questions while returning an unchanged
    list. Costs nothing today, but it is the Tier-3 turn-budget target and reads badly in a demo.
-3. **State is first-write-wins**, so an intent override appends instead of replacing, and a stale
+2. **State is first-write-wins**, so an intent override appends instead of replacing, and a stale
    colour/material can keep a wrong hard `AND` filter in place. Needs erase-and-rewrite.
-4. **`user_profile` is ignored entirely** — `reset()` discards it.
-5. **Generic constraints still fail.** When a target's disclosed constraints don't discriminate
-   (*"leather; Imported; Buckle closure"* among hundreds of leather belts), no amount of asking
-   helps. Needs reranking or dense retrieval.
+3. **`user_profile` is ignored entirely** — `reset()` discards it.
+4. **Generic constraints still fail.** When a target's disclosed constraints don't discriminate
+   (*"100% Cotton; Imported; Button closure"* among thousands of shirts), no amount of asking or
+   lexical reranking helps — this is now 6 of the 7 remaining misses. Needs dense retrieval.
 
 ## Priorities
 
@@ -197,7 +211,7 @@ Cut from the bottom up. Never let a Tier 3 idea pull someone off Tier 1 work.
 |---|---|---|
 | 0 | prerequisite | agent contract wired end-to-end; evaluator reproduces a score |
 | 1 | HitRate@10 (50%) | dual-track routing ✅ · multi-route retrieval ✅ · slot memory ✅ · clarification trigger ✅ |
-| 2 | MRR (30%) | **semantic reranking (do this next)** · hybrid/dense retrieval · intent override · personalization |
+| 2 | MRR (30%) | semantic reranking ✅ · hybrid/dense retrieval · intent override · personalization |
 | 3 | Efficiency (20%) + feasibility | turn-budget discipline · latency & token logging · offline fallback · boundary handling |
 
 Four roles, split by problem-statement pillar — Retrieval & Routing, Dialog + Ranking, Integration,

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from starter import retrieval
 from starter.dialog_state import DialogState
+from starter.ranking import Reranker
 from starter.retrieval import CatalogIndex
 
 
@@ -25,6 +26,7 @@ class Agent:
 
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.index = CatalogIndex(catalog_path)
+        self.reranker = Reranker(self.index)
         self._sessions: dict[str, DialogState] = {}
 
     def reset(self, session_id: str, user_profile: dict) -> None:
@@ -48,11 +50,17 @@ class Agent:
         query_terms = retrieval.terms(state.evidence_text())[:MAX_QUERY_TERMS]
         is_buying = state.is_buying
 
+        # Retrieval fuses a pool several times longer than the answer; the reranker
+        # decides which of it surfaces. Fusion knows which products match a bag of terms,
+        # but not which one the customer was quoting.
+        phrases = state.evidence_phrases()
+
         recommendations = self.index.retrieve(
             query_terms,
             state.and_terms() if is_buying else [],
             state.price_max() if is_buying else None,
             top_k,
+            reranker=lambda pool: self.reranker.order(pool, phrases),
         )
 
         # Recommendations are scored every turn, so asking costs us nothing and is the
