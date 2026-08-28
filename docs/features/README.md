@@ -67,4 +67,5 @@ What it does not fix, what it made worse, and what should come next.
 | 02 | [Multi-route retrieval pipeline](02-multi-route-retrieval.md) | 1 | 0.124334 |
 | 03 | [Clarification loop and cross-turn evidence](03-clarification-loop.md) | 1 | 0.681542 |
 | 04 | [Semantic reranking](04-semantic-reranking.md) | 2 | 0.84752 |
-| 05 | [Rank-vs-turn arbitrage](05-rank-vs-turn-arbitrage.md) | 2 | **0.898866** |
+| 05 | [Rank-vs-turn arbitrage](05-rank-vs-turn-arbitrage.md) | 2 | 0.898866 |
+| 06 | [Phrase retrieval + constraint bugs](06-phrase-retrieval.md) | 2 | **0.907281** |

@@ -8,6 +8,7 @@ conversations — see dialog_state.py for that.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from pathlib import Path
@@ -23,6 +24,23 @@ STOPWORDS = {
 
 OVERFETCH_MULT = 5
 CATEGORY_ROUTE_WEIGHT = 0.3
+
+# Phrase route. The keyword route dissolves every disclosure into a bag of terms, so a
+# product carrying the customer's exact wording is scored by BM25 against a ~60-term OR
+# and can sit below the fetch limit among thousands of equally-partial matches. Measured
+# on the misses: public_0042's target holds three phrases with a document frequency of
+# *one* ("100-hour chronograph with lap & split times") and was still never retrieved,
+# because those are just five more terms in the OR.
+#
+# So query the phrases intact. A phrase is worth a route when it is specific enough to
+# narrow the catalog; past PHRASE_DF_MAX it is boilerplate ("Imported" at 15300,
+# "Button closure" at 2391) and only adds noise. Rarer phrases fuse in harder, scaled by
+# their inverse document frequency.
+PHRASE_MIN_TOKENS = 2
+PHRASE_DF_MAX = 2000
+PHRASE_ROUTE_WEIGHT = 0.5
+MAX_PHRASE_ROUTES = 12
+
 
 # How many fused candidates a reranker gets to reorder. Bigger pools give the reranker
 # more chances to rescue a buried target, but every extra candidate is also a chance to
@@ -81,6 +99,32 @@ def tokens(text: str) -> list[str]:
 def terms(text: str) -> list[str]:
     """Tokenize, drop stopwords and single characters, preserving first-seen order."""
     return list(dict.fromkeys(tokens(text)))
+
+
+def fts_tokens(text: str) -> list[str]:
+    """Tokenize the way FTS5's own `unicode61` tokenizer did when the index was built.
+
+    Deliberately *not* `tokens()`. That one drops stopwords and single characters, which
+    is right for reranking -- both sides of that comparison go through it, so it stays
+    self-consistent. It is wrong for querying: the index still contains "on" and "the",
+    so a phrase query built from `tokens("Pull On closure")` asks FTS5 for the adjacent
+    pair "pull closure", which almost nothing contains. That silently turns a common
+    phrase into a rare one and matches the wrong documents.
+    """
+    return [token.lower() for token in TOKEN_RE.findall(text)]
+
+
+def phrase_expression(text: str, min_tokens: int = PHRASE_MIN_TOKENS) -> str | None:
+    """An FTS5 phrase query for `text`, or None if it is too short to be worth one.
+
+    Single tokens are excluded: a one-word "phrase" is just a term, which the keyword
+    route already covers, and it carries none of the adjacency signal that makes this
+    route worth running.
+    """
+    words = fts_tokens(text)
+    if len(words) < min_tokens:
+        return None
+    return '"' + " ".join(words) + '"'
 
 
 def with_and_terms(expression: str, and_terms: list[str]) -> str:
@@ -169,6 +213,49 @@ class CatalogIndex:
             self._document_frequency_cache[term] = cached
         return cached
 
+    def phrase_document_frequency(self, expression: str) -> int:
+        """How many products contain this exact phrase. Cached; `expression` is reused as
+        the cache key since it is already the normalized form."""
+        cached = self._document_frequency_cache.get(expression)
+        if cached is None:
+            row = self.connection.execute(
+                "SELECT count(*) FROM products WHERE products MATCH ?", (expression,)
+            ).fetchone()
+            cached = int(row[0]) if row else 0
+            self._document_frequency_cache[expression] = cached
+        return cached
+
+    def phrase_routes(self, phrases: list[str]) -> list[tuple[str, float]]:
+        """`(phrase expression, fusion weight)` for the disclosures worth their own query.
+
+        Weight rises as the phrase gets rarer: a phrase held by one product in 50,000 is
+        near-conclusive evidence, while one held by 2,000 is a weak hint. Boilerplate
+        above PHRASE_DF_MAX, and phrases nothing matches, are dropped entirely.
+        """
+        scored: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        for phrase in phrases:
+            expression = phrase_expression(phrase)
+            if expression is None or expression in seen:
+                continue
+            seen.add(expression)
+            try:
+                frequency = self.phrase_document_frequency(expression)
+            except sqlite3.Error:
+                # A phrase that FTS5 will not parse is not worth failing the turn over.
+                continue
+            if 0 < frequency <= PHRASE_DF_MAX:
+                scored.append((frequency, expression))
+
+        # Rarest first, so the cap keeps the most informative phrases rather than
+        # whichever the customer happened to say first.
+        scored.sort()
+        routes: list[tuple[str, float]] = []
+        for frequency, expression in scored[:MAX_PHRASE_ROUTES]:
+            rarity = math.log(self.document_count / frequency) / math.log(self.document_count)
+            routes.append((expression, PHRASE_ROUTE_WEIGHT * rarity))
+        return routes
+
     def document_profile(self, parent_asin: str) -> tuple[dict[str, float], str]:
         """`(term -> best field factor, the whole document as a token string)`.
 
@@ -242,6 +329,7 @@ class CatalogIndex:
         price_max: float | None,
         top_k: int,
         reranker: Callable[[list[str]], list[str]] | None = None,
+        phrases: list[str] | None = None,
     ) -> list[dict]:
         base_expression = or_expression(query_terms)
         if not base_expression:
@@ -264,9 +352,22 @@ class CatalogIndex:
             with_and_terms(category_base, and_terms), price_max, limit
         )
 
-        merged = self.fuse_rankings(
-            [(keyword_ids, 1.0), (category_ids, CATEGORY_ROUTE_WEIGHT)], pool_k
-        )
+        # Route 3: phrase routes -- one query per intact disclosure specific enough to
+        # narrow the catalog. These are what rescue a target the keyword route dissolved
+        # into a bag of common terms; a df=1 phrase puts it at rank 1 of a 1-item list,
+        # which RRF then weights accordingly.
+        routes: list[tuple[list[str], float]] = [
+            (keyword_ids, 1.0),
+            (category_ids, CATEGORY_ROUTE_WEIGHT),
+        ]
+        for expression, weight in self.phrase_routes(phrases or []):
+            # Deliberately unfiltered -- by and_terms and by price alike. The phrase is a
+            # far stronger constraint than a regex-scraped colour or budget, so a wrong
+            # filter must not be able to suppress the one route that identifies the
+            # product. Fusion and reranking still have to agree before it surfaces.
+            routes.append((self.run_ranked_query(expression, None, limit), weight))
+
+        merged = self.fuse_rankings(routes, pool_k)
 
         # Safety net: if hard filters (buying track) narrowed things too far, backfill
         # from an unfiltered wide search rather than returning too few recommendations.

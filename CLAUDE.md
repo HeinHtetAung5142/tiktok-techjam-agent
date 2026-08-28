@@ -39,25 +39,27 @@ Metrics are also reported per scenario — always read the breakdown, not just t
 
 ### Score of record
 
-| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_disclosure.json`) |
+| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_phrase.json`) |
 |---|---|---|
-| HitRate@10 | 0.125 | 0.965 |
-| MRR | 0.068034 | 0.85222 |
-| MTTC | 9.81 | 2.965 |
-| **TechnicalScore** | **0.10671** | **0.898866** |
+| HitRate@10 | 0.125 | 0.975 |
+| MRR | 0.068034 | 0.857935 |
+| MTTC | 9.81 | 2.88 |
+| **TechnicalScore** | **0.10671** | **0.907281** |
 
 Per scenario HitRate@10, current: boundary 1.0 · browsing 0.9875 · intent_override 0.9667 ·
-buying 0.9375.
+buying 0.9625.
 
-**Both cheap terms are now spent.** MRR went 0.652 → 0.852 by trading turns for rank
-(`docs/features/05-rank-vs-turn-arbitrage.md`), and it plateaus there: past a `(1, 1, …)`
-disclosure schedule, more patience buys no more rank. 160 of 193 hits land at rank 1.
+**Every cheap term is spent.** MRR went 0.652 → 0.852 by trading turns for rank
+(`docs/features/05-rank-vs-turn-arbitrage.md`) and plateaus there; phrase retrieval plus two
+constraint-extraction bug fixes took HitRate to 0.975
+(`docs/features/06-phrase-retrieval.md`). 161 of 195 hits land at rank 1.
 
-What is left is genuinely hard. The 7 remaining misses and the 33 non-rank-1 hits are the same
-problem — 6 of the misses are targets whose disclosed constraints are pure boilerplate ("100%
-Cotton; Imported; Button closure") shared with thousands of products. No lexical method separates
-those, and no amount of extra turns produces better evidence about them. **Further gains need
-dense retrieval**, or the untouched `user_profile`.
+**The 5 remaining misses are not a retrieval problem and cannot be fixed by a better retriever.**
+Their disclosed constraints are shared with thousands of products — `public_0087` discloses only
+"cotton" (df 9775), "100% Cotton" (3770), "Imported" (15300), "Button closure" (2391). Nothing
+lexical *or* dense separates a target from 3,000 items when the evidence is identical across all of
+them. This was verified, not assumed: see the rejected conjunction route in feature 06. Do not
+spend the remaining time here.
 
 ## Commands
 
@@ -74,7 +76,7 @@ because it assumes Linux — our submission instructions must cover both.
 A full run takes roughly 20 seconds: the FTS5 index over all 50k products is rebuilt on `Agent()`
 construction, then 200 sessions replay against it. It was ~60s before reranking landed; deferred
 disclosure (feature 05) added a few seconds back, since sessions now deliberately run a turn or two
-longer to buy rank.
+longer to buy rank, and the phrase routes (feature 06) add a handful of extra FTS5 queries per turn.
 
 `requirements.txt` is currently **empty** — the agent is pure standard library. Anything added must
 be pinned there, or the organizer cannot reproduce the run.
@@ -158,6 +160,10 @@ Keep the contract surface in `agent.py`; everything else is imported.
 | `CatalogIndex.document_frequency` | retrieval.py | document frequency from FTS5's own `fts5vocab` table |
 | `Reranker.order` | ranking.py | reorders a candidate pool against the customer's own phrasing |
 | `tokens` | retrieval.py | tokenizing that keeps order *and* duplicates (`terms` dedupes) |
+| `fts_tokens` | retrieval.py | tokenizing that matches the **index** — keeps stopwords, for querying |
+| `phrase_expression` | retrieval.py | one disclosure -> an FTS5 phrase query, or None if too short |
+| `CatalogIndex.phrase_routes` | retrieval.py | the disclosures worth their own query, IDF-weighted |
+| `disclosure_limit` | agent.py | how much of the ranked list this turn is allowed to reveal |
 
 ## How scoring actually behaves
 
@@ -203,15 +209,15 @@ not survive that; modelling "ask a targeted question, absorb the answer into sta
 
 ## Known gaps (highest leverage first)
 
-1. **Generic constraints still fail.** When a target's disclosed constraints don't discriminate
-   (*"100% Cotton; Imported; Button closure"* among thousands of shirts), no amount of asking or
-   lexical reranking helps — 6 of the 7 remaining misses, and the same cause as most of the 33
-   non-rank-1 hits. Needs dense retrieval. **This is now the only large pot left.**
-2. **State is first-write-wins**, so an intent override appends instead of replacing, and a stale
-   colour/material can keep a wrong hard `AND` filter in place. Needs erase-and-rewrite. Note the
-   score case is weak — `intent_override` already has the best per-scenario MRR — so treat this as
-   correctness insurance for the private set, not a points play.
-3. **`user_profile` is ignored entirely** — `reset()` discards it.
+1. **State is first-write-wins**, so an intent override appends instead of replacing, and a stale
+   colour/material keeps a wrong hard `AND` filter in place. This is now the top gap and it has
+   *measured* victims: `public_0020` and `public_0145` are missed because a scraped colour excludes
+   the target's own text. Needs erase-and-rewrite.
+2. **`user_profile` is ignored entirely** — `reset()` discards it. Untouched signal, though the
+   fields are abstract (`preference_tags` like "fit", "comfort") and may not identify a product.
+3. **Five misses are information-theoretically unreachable.** Their disclosed constraints don't
+   discriminate at all. Verified in feature 06 — a conjunction route that narrowed the candidate
+   set to 100 still could not order it. **Not worth further retrieval work.**
 4. **The first two turns return a single recommendation** (feature 05). It never costs a find here
    and it is contract-legal, but it is thin UX and reads oddly in a live demo. Disclose it in the
    final report rather than letting a judge find it.

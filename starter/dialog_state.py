@@ -25,8 +25,20 @@ MATERIAL_RE = re.compile(
     r"\b(cotton|polyester|nylon|leather|wool|spandex|silk|rayon|fabric)\b", re.IGNORECASE
 )
 PRICE_DOLLAR_RE = re.compile(r"\$\s*(\d+(?:\.\d{1,2})?)")
+# Units that prove a bare number is a measurement, not money. Without this, "fits up to
+# 8-inch wrist circumference" sets a $8 price ceiling and the hard filter then excludes the
+# very product the customer is describing -- which is exactly how public_0042's Timex was
+# lost. Measured on the public set: three such disclosures, and *zero* genuine "$" prices,
+# so this regex only ever fired wrongly here.
+PRICE_UNIT = (
+    r"inch|inches|hour|hours|day|days|week|weeks|month|months|year|years|minute|minutes|"
+    r"second|seconds|pair|pairs|pack|packs|piece|pieces|count|degree|degrees|"
+    r"oz|ounce|ounces|lb|lbs|pound|pounds|gram|grams|kg|"
+    r"mm|cm|m|ft|feet|foot|yard|yards|percent|thread|ply|gsm|business|x"
+)
 PRICE_PHRASE_RE = re.compile(
-    r"(?:under|below|less than|no more than|up to|at most)\s+\$?\s*(\d+(?:\.\d{1,2})?)",
+    r"(?:under|below|less than|no more than|up to|at most)\s+\$?\s*(\d+(?:\.\d{1,2})?)(?!\d)"
+    rf"(?![\s-]*(?:{PRICE_UNIT})\b)",
     re.IGNORECASE,
 )
 

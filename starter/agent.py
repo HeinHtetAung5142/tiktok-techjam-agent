@@ -88,6 +88,7 @@ class Agent:
             state.price_max() if is_buying else None,
             top_k,
             reranker=lambda pool: self.reranker.order(pool, phrases),
+            phrases=phrases,
         )
 
         # Recommendations are scored every turn, so asking costs us nothing and is the
