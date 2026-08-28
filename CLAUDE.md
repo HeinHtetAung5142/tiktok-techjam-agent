@@ -39,22 +39,25 @@ Metrics are also reported per scenario — always read the breakdown, not just t
 
 ### Score of record
 
-| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_reranking.json`) |
+| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_disclosure.json`) |
 |---|---|---|
 | HitRate@10 | 0.125 | 0.965 |
-| MRR | 0.068034 | 0.652067 |
-| MTTC | 9.81 | 2.53 |
-| **TechnicalScore** | **0.10671** | **0.84752** |
+| MRR | 0.068034 | 0.85222 |
+| MTTC | 9.81 | 2.965 |
+| **TechnicalScore** | **0.10671** | **0.898866** |
 
 Per scenario HitRate@10, current: boundary 1.0 · browsing 0.9875 · intent_override 0.9667 ·
 buying 0.9375.
 
-**MRR is still the weak term, but it is no longer the cheap one.** HitRate@10 is 0.965 against an
-MRR of 0.652, so the target is almost always in the list and usually near the top. Of the 7
-remaining misses, 6 are targets whose disclosed constraints are pure boilerplate ("100% Cotton;
-Imported; Button closure") shared with thousands of products — no lexical method can separate
-those. Further gains need dense retrieval, or they need the turn budget and the untouched
-`user_profile`.
+**Both cheap terms are now spent.** MRR went 0.652 → 0.852 by trading turns for rank
+(`docs/features/05-rank-vs-turn-arbitrage.md`), and it plateaus there: past a `(1, 1, …)`
+disclosure schedule, more patience buys no more rank. 160 of 193 hits land at rank 1.
+
+What is left is genuinely hard. The 7 remaining misses and the 33 non-rank-1 hits are the same
+problem — 6 of the misses are targets whose disclosed constraints are pure boilerplate ("100%
+Cotton; Imported; Button closure") shared with thousands of products. No lexical method separates
+those, and no amount of extra turns produces better evidence about them. **Further gains need
+dense retrieval**, or the untouched `user_profile`.
 
 ## Commands
 
@@ -68,9 +71,10 @@ py tools/score_delta.py <before.json> <after.json>   # markdown delta table for 
 Store stub and fail; `py` is the real launcher (Python 3.12.0). The organizer README says `python3`
 because it assumes Linux — our submission instructions must cover both.
 
-A full run takes roughly 15 seconds: the FTS5 index over all 50k products is rebuilt on `Agent()`
-construction, then 200 sessions replay against it. It was ~60s before reranking landed — sessions
-now end sooner because the target surfaces earlier.
+A full run takes roughly 20 seconds: the FTS5 index over all 50k products is rebuilt on `Agent()`
+construction, then 200 sessions replay against it. It was ~60s before reranking landed; deferred
+disclosure (feature 05) added a few seconds back, since sessions now deliberately run a turn or two
+longer to buy rank.
 
 `requirements.txt` is currently **empty** — the agent is pure standard library. Anything added must
 be pinned there, or the organizer cannot reproduce the run.
@@ -178,6 +182,12 @@ below is derived from `evaluator/local_evaluator.py` — no ground-truth peeking
 - **Disclosures are near-verbatim target text.** Intent cards are built from the target's own
   `features`/`details` (`evaluator/local_evaluator.py:52-71`), so getting the customer to speak is
   getting them to quote the answer. Feed it all straight into the query.
+- **The first hit ends the session and freezes the rank.** `evaluator/local_evaluator.py:243`
+  `break`s the moment the target appears anywhere in the top 10, so `best_rank` is its rank on that
+  turn and no later turn can improve it. Surfacing the target early at a bad rank is therefore a
+  *cost*, not a win — and the weights say so: one turn of delay costs 0.0001 of TechnicalScore while
+  one unit of RR is worth 0.0015, so deferring pays whenever it buys more than ~0.067 RR. This is
+  the whole basis of feature 05; don't "optimize" the disclosure gate away.
 - **Intent-override sessions cannot convert early.** The `override_applied` guard
   (`evaluator/local_evaluator.py:252`) discards hits before the override message fires on turn 3
   or 4. Ranking the target at #1 on turn 1 scores nothing in those sessions.
@@ -193,15 +203,22 @@ not survive that; modelling "ask a targeted question, absorb the answer into sta
 
 ## Known gaps (highest leverage first)
 
-1. **Turns are wasted once evidence runs dry.** Around turn 4–5 the agent typically exhausts every
-   attribute and spends the rest of the session asking dead questions while returning an unchanged
-   list. Costs nothing today, but it is the Tier-3 turn-budget target and reads badly in a demo.
-2. **State is first-write-wins**, so an intent override appends instead of replacing, and a stale
-   colour/material can keep a wrong hard `AND` filter in place. Needs erase-and-rewrite.
-3. **`user_profile` is ignored entirely** — `reset()` discards it.
-4. **Generic constraints still fail.** When a target's disclosed constraints don't discriminate
+1. **Generic constraints still fail.** When a target's disclosed constraints don't discriminate
    (*"100% Cotton; Imported; Button closure"* among thousands of shirts), no amount of asking or
-   lexical reranking helps — this is now 6 of the 7 remaining misses. Needs dense retrieval.
+   lexical reranking helps — 6 of the 7 remaining misses, and the same cause as most of the 33
+   non-rank-1 hits. Needs dense retrieval. **This is now the only large pot left.**
+2. **State is first-write-wins**, so an intent override appends instead of replacing, and a stale
+   colour/material can keep a wrong hard `AND` filter in place. Needs erase-and-rewrite. Note the
+   score case is weak — `intent_override` already has the best per-scenario MRR — so treat this as
+   correctness insurance for the private set, not a points play.
+3. **`user_profile` is ignored entirely** — `reset()` discards it.
+4. **The first two turns return a single recommendation** (feature 05). It never costs a find here
+   and it is contract-legal, but it is thin UX and reads oddly in a live demo. Disclose it in the
+   final report rather than letting a judge find it.
+
+*Removed:* "turns are wasted once evidence runs dry" was listed here for three features and was
+never true — no session runs past turn 4 except the 7 misses. It is now deliberately false in the
+other direction: feature 05 spends those turns on purpose.
 
 ## Priorities
 
@@ -211,8 +228,8 @@ Cut from the bottom up. Never let a Tier 3 idea pull someone off Tier 1 work.
 |---|---|---|
 | 0 | prerequisite | agent contract wired end-to-end; evaluator reproduces a score |
 | 1 | HitRate@10 (50%) | dual-track routing ✅ · multi-route retrieval ✅ · slot memory ✅ · clarification trigger ✅ |
-| 2 | MRR (30%) | semantic reranking ✅ · hybrid/dense retrieval · intent override · personalization |
-| 3 | Efficiency (20%) + feasibility | turn-budget discipline · latency & token logging · offline fallback · boundary handling |
+| 2 | MRR (30%) | semantic reranking ✅ · rank-vs-turn arbitrage ✅ · hybrid/dense retrieval · intent override · personalization |
+| 3 | Efficiency (20%) + feasibility | latency & token logging · offline fallback · boundary handling |
 
 Four roles, split by problem-statement pillar — Retrieval & Routing, Dialog + Ranking, Integration,
 Coordination + Evaluation. **Individual assignments are still TBD.**

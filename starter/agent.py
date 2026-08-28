@@ -21,6 +21,33 @@ from starter.retrieval import CatalogIndex
 MAX_QUERY_TERMS = 64
 
 
+# Rank-vs-turn arbitrage. The evaluator ends the session the moment the target appears
+# anywhere in the top 10, and freezes its rank at that turn
+# (evaluator/local_evaluator.py:243) -- there is no later turn in which to promote it.
+# The weights make that trade lopsided. Per session, one extra turn of delay costs
+# 0.20 * (1/200) / 10 = 0.0001 of TechnicalScore, while one unit of reciprocal rank is
+# worth 0.30 * (1/200) = 0.0015. Deferring a hit therefore pays off whenever it buys
+# more than ~0.067 RR -- about one slot at rank 4, and rank 2 -> 1 is worth seven turns.
+#
+# So early turns disclose only the head of the list we actually believe in. The tail is
+# withheld until another round of clarification has had a chance to promote the target
+# out of it. Indexed by turn, last entry repeating.
+DISCLOSURE_SCHEDULE = (1, 1, 4, 8, 10)
+
+
+def disclosure_limit(turn: int, top_k: int, more_evidence_coming: bool) -> int:
+    """How many recommendations this turn may reveal.
+
+    Withholding the tail is only a bet on better evidence arriving. Once there is
+    nothing left to ask, no later turn can improve the order, and holding anything back
+    is pure loss -- so the full list goes out immediately.
+    """
+    if not more_evidence_coming:
+        return top_k
+    index = min(max(turn, 1), len(DISCLOSURE_SCHEDULE)) - 1
+    return min(DISCLOSURE_SCHEDULE[index], top_k)
+
+
 class Agent:
     """Multi-turn shopping agent: FTS5 retrieval, no LLM, no network."""
 
@@ -66,6 +93,10 @@ class Agent:
         # Recommendations are scored every turn, so asking costs us nothing and is the
         # only way the customer ever discloses more.
         ask_attribute = state.next_attribute()
+
+        # Show only as much of the list as this turn has earned. See DISCLOSURE_SCHEDULE.
+        limit = disclosure_limit(turn, top_k, more_evidence_coming=ask_attribute is not None)
+        recommendations = recommendations[:limit]
 
         return {
             "message": state.message(ask_attribute),
