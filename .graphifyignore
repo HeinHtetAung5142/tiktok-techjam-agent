@@ -1,0 +1,13 @@
+# Keep graph extraction on our source, not on competition data or generated output.
+
+# 60MB frozen catalog + labeled sessions -- data, not code.
+data/
+
+# Evaluator output snapshots.
+results.json
+results_after_*.json
+
+# Organizer-provided spec/contract files.
+docs/
+
+graphify-out/

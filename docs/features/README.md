@@ -1,0 +1,67 @@
+# Feature log
+
+One file per feature, numbered in build order: `NN-<kebab-case-name>.md`.
+
+These notes are not ceremony — the competition requires a final report covering *architecture,
+model choice, cost, and limitations*, and a submission whose results can be reproduced. If each
+feature is written up as it lands, that report is assembly rather than a panicked rewrite on the
+last morning.
+
+## Definition of done
+
+A feature is not done until the evaluator has been re-run and the score movement written down.
+
+```bash
+py -m evaluator.local_evaluator --output results_after_<milestone>.json
+py tools/score_delta.py <previous>.json results_after_<milestone>.json
+```
+
+Paste the generated table into your feature doc, then commit the code and the results snapshot
+together.
+
+## Reading the numbers honestly
+
+- The public set is **200 sessions**, so one session moves HitRate@10 by **0.005**. A
+  TechnicalScore delta below **~0.01** is noise. `score_delta.py` flags this for you — don't
+  overrule it because the arrow is green.
+- **Always include the per-scenario table.** The aggregate hides inversions: a change can lift
+  buying while flattening browsing, and the four scenarios are weighted 40/40/15/5 in both the
+  public and private sets.
+- **HitRate and MRR can move in opposite directions.** Widening the candidate pool finds more
+  targets but often lands them at rank 8–10, which raises HitRate (50% of score) while lowering MRR
+  (30%). This already happened once — see `02-multi-route-retrieval.md`. Say so when it does.
+- **Runs are deterministic.** Identical code scores identically, so any change in the number is
+  caused by your change, not by sampling.
+- **Record flat and negative results.** A regression written up in two minutes stops a teammate
+  re-attempting the same idea on the final day. There is no penalty for a documented dead end.
+
+## Template
+
+```markdown
+# NN — Feature name
+
+**Status:** merged | reverted | experimental
+**Commit:** <sha>
+**Owner:** <role>
+**Tier:** <0–3>
+
+## What & why
+One paragraph: the problem, and which scoring term it targets.
+
+## Approach
+How it works. Name the functions/files touched. Note anything a reviewer would find surprising.
+
+## Measured impact
+<paste `py tools/score_delta.py` output here>
+
+## Limitations & follow-ups
+What it does not fix, what it made worse, and what should come next.
+```
+
+## Index
+
+| # | Feature | Tier | TechnicalScore after |
+|---|---|---|---|
+| — | _starter baseline_ | — | 0.10671 |
+| 01 | [Dual-track intent routing](01-dual-track-intent-routing.md) | 1 | 0.110829 |
+| 02 | [Multi-route retrieval pipeline](02-multi-route-retrieval.md) | 1 | 0.124334 |

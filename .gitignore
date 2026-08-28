@@ -9,3 +9,10 @@ env/
 
 .vscode/
 .idea/
+
+# graphify knowledge graph (generated; each clone builds its own)
+graphify-out/
+
+# Claude Code local config (graphify hook paths are machine-specific;
+# each teammate runs `graphify claude install` -- see CLAUDE.md)
+.claude/

@@ -1,0 +1,25 @@
+#!/bin/sh
+# Refresh the graphify knowledge graph after a merge.
+#
+# Why this exists: `graphify hook install` only installs post-commit and
+# post-checkout. Neither fires on a merge --
+#   * a fast-forward merge creates no commit and no checkout, so nothing runs;
+#   * a merge commit is skipped by post-commit's own MERGE_HEAD guard.
+# Both were verified empirically on this repo. Without this hook the graph goes
+# stale exactly when it matters most: right after you pull in a teammate's work.
+#
+# Install (each clone, hooks are not version-controlled):
+#   cp tools/git-hooks/post-merge .git/hooks/post-merge
+#   chmod +x .git/hooks/post-merge
+
+[ "${GRAPHIFY_SKIP_HOOK:-0}" = "1" ] && exit 0
+
+command -v graphify >/dev/null 2>&1 || exit 0
+
+# Whole-repo re-extract rather than a changed-path list: after a merge, ORIG_HEAD..HEAD
+# can span many commits, and this repo is small enough (a handful of Python files)
+# that a full AST pass costs a couple of seconds. No LLM, no API key, no network.
+echo "[graphify post-merge] refreshing knowledge graph..."
+graphify update . || echo "[graphify post-merge] update failed; run 'graphify update .' by hand" >&2
+
+exit 0
