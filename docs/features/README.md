@@ -65,3 +65,4 @@ What it does not fix, what it made worse, and what should come next.
 | — | _starter baseline_ | — | 0.10671 |
 | 01 | [Dual-track intent routing](01-dual-track-intent-routing.md) | 1 | 0.110829 |
 | 02 | [Multi-route retrieval pipeline](02-multi-route-retrieval.md) | 1 | 0.124334 |
+| 03 | [Clarification loop and cross-turn evidence](03-clarification-loop.md) | 1 | **0.681542** |

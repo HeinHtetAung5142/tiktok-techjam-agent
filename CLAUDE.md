@@ -39,14 +39,17 @@ Metrics are also reported per scenario — always read the breakdown, not just t
 
 ### Score of record
 
-| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_multiroute.json`) |
+| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_clarification.json`) |
 |---|---|---|
-| HitRate@10 | 0.125 | 0.150 |
-| MRR | 0.068034 | 0.068446 |
-| MTTC | 9.81 | 9.56 |
-| **TechnicalScore** | **0.10671** | **0.124334** |
+| HitRate@10 | 0.125 | 0.825 |
+| MRR | 0.068034 | 0.420141 |
+| MTTC | 9.81 | 3.85 |
+| **TechnicalScore** | **0.10671** | **0.681542** |
 
-Per scenario, current: buying 0.2875 · intent_override 0.1333 · browsing 0.0375 · boundary 0.0.
+Per scenario, current: boundary 0.9 · browsing 0.8625 · intent_override 0.8 · buying 0.7875.
+
+**MRR is now the weak term.** HitRate@10 is 0.825 while MRR is 0.420 — targets are being found and
+then buried mid-list. Reranking is where the remaining points are.
 
 ## Commands
 
@@ -91,15 +94,29 @@ These are competition constraints, not style preferences. Violating them invalid
 
 ## Architecture
 
-`starter/agent.py` — a single `Agent` class. No third-party deps, no network.
+Three modules, no third-party deps, no network:
+
+```text
+starter/agent.py         orchestration + the official reset()/respond() contract
+starter/retrieval.py     FTS5 index, query routes, RRF fusion
+starter/dialog_state.py  per-session slots, evidence accumulation, question policy
+starter/ranking.py       NOT YET WRITTEN -- the agreed home for reranking + personalization
+```
+
+Keep the contract surface in `agent.py`; everything else is imported.
 
 - **Index.** `_build_index` loads all 50k products into an in-memory SQLite **FTS5** table at
   construction. Columns are separately weighted at query time via `bm25()`; `parent_asin` and
   `price` are `UNINDEXED` (price is a numeric filter, not a search term).
-- **Constraint extraction.** `_detect_constraints` regex-scrapes color, material, and a price
-  ceiling from each message. `reset()` initialises per-session state; `respond()` merges newly
-  detected values **first-write-wins** — which is exactly why intent override doesn't work yet
-  (see Known gaps).
+- **Constraint extraction.** `detect_constraints` regex-scrapes color, material, and a price
+  ceiling from each message, merged **first-write-wins** — which is exactly why intent override
+  doesn't work yet (see Known gaps).
+- **Evidence accumulation.** `DialogState.evidence` keeps every disclosure the customer has made,
+  oldest first, and the query is built from all of it. Retrieving on the latest message alone throws
+  away the product category from turn 1.
+- **Clarification.** `DialogState.next_attribute()` walks `ASK_ORDER`, retiring attributes the
+  customer says are empty. We ask on every turn: recommendations are scored every turn regardless,
+  so a question is free.
 - **Dual-track routing.** If any constraint has been detected the session is on the *buying* track:
   constraints become hard `AND` terms plus a price filter. Otherwise it is *browsing* — a wide,
   unfiltered `OR` query.
@@ -112,26 +129,14 @@ These are competition constraints, not style preferences. Violating them invalid
 
 ### Reuse these — don't rewrite them
 
-| Helper | Does |
-|---|---|
-| `_run_ranked_query` | one FTS5 MATCH + optional price filter + BM25 ordering |
-| `_fuse_rankings` | weighted RRF over any number of ranked lists |
-| `_detect_constraints` | color / material / price-ceiling regex extraction |
-| `_terms` | tokenize + stopword-strip a message |
-| `_with_and_terms` | compose an FTS5 expression with required AND terms |
-
-### Target module split (team decision)
-
-`agent.py` is being split so four people can work in parallel without merge pain:
-
-```text
-starter/agent.py         orchestration + the official reset()/respond() contract
-starter/retrieval.py     FTS5 index, query routes, RRF fusion
-starter/dialog_state.py  per-session slot memory, constraint extraction, override handling
-starter/ranking.py       reranking, personalization from user_profile
-```
-
-Keep the contract surface in `agent.py`; everything else is imported.
+| Helper | In | Does |
+|---|---|---|
+| `CatalogIndex.retrieve` | retrieval.py | the whole two-route + fusion + backfill pipeline |
+| `CatalogIndex.run_ranked_query` | retrieval.py | one FTS5 MATCH + optional price filter + BM25 ordering |
+| `CatalogIndex.fuse_rankings` | retrieval.py | weighted RRF over any number of ranked lists |
+| `terms` / `or_expression` / `with_and_terms` | retrieval.py | tokenizing and FTS5 expression building |
+| `detect_constraints` | dialog_state.py | color / material / price-ceiling regex extraction |
+| `DialogState.evidence_text` | dialog_state.py | everything the customer has revealed, oldest first |
 
 ## How scoring actually behaves
 
@@ -144,7 +149,18 @@ below is derived from `evaluator/local_evaluator.py` — no ground-truth peeking
   re-ask an exhausted one and you get *"I don't have an additional preference for X."*
 - **`ask_attribute: null` wastes the turn.** With no attribute the customer replies *"Those options
   are not quite right yet. Ask me about one specific attribute."* and reveals nothing
-  (`evaluator/local_evaluator.py:171`).
+  (`evaluator/local_evaluator.py:171`). Always ask something.
+- **`other` is the only attribute that cannot whiff.** The disclosure filter is
+  `attribute == "other" or classify_constraint(value) == attribute`
+  (`evaluator/local_evaluator.py:178-181`), so `other` matches any undisclosed constraint and returns
+  up to two per turn. This is simulator-specific — see the risk note in
+  `docs/features/03-clarification-loop.md`.
+- **"an additional preference" vs "a preference" are different replies.** The first means the
+  attribute is genuinely empty (retire it); the second is the boundary customer deferring once (do
+  **not** retire it, they answer normally afterwards).
+- **Disclosures are near-verbatim target text.** Intent cards are built from the target's own
+  `features`/`details` (`evaluator/local_evaluator.py:52-71`), so getting the customer to speak is
+  getting them to quote the answer. Feed it all straight into the query.
 - **Intent-override sessions cannot convert early.** The `override_applied` guard
   (`evaluator/local_evaluator.py:252`) discards hits before the override message fires on turn 3
   or 4. Ranking the target at #1 on turn 1 scores nothing in those sessions.
@@ -160,14 +176,18 @@ not survive that; modelling "ask a targeted question, absorb the answer into sta
 
 ## Known gaps (highest leverage first)
 
-1. **No clarification loop.** `ask_attribute` is hardcoded `None` (`starter/agent.py:213`), so every
-   session re-runs retrieval on the identical turn-1 message for all 10 turns — the agent spends its
-   whole turn budget without gaining information. This is the Tier-1 *Clarification trigger*, and it
-   is the direct cause of browsing 0.0375 and boundary 0.0.
-2. **State is first-write-wins**, so an intent override appends instead of replacing. Handling it
-   needs erase-and-rewrite of the affected slots.
-3. **`user_profile` is ignored entirely** — `reset()` discards it.
-4. **No reranking.** Whatever RRF emits is the final order, which caps MRR (30% of the score).
+1. **No reranking.** Whatever RRF emits is the final order. With HitRate@10 at 0.825 and MRR at
+   0.420, targets are being found and then buried mid-list — this is now the biggest single pot of
+   points on the board (MRR is 30% of the score).
+2. **Turns are wasted once evidence runs dry.** Around turn 4–5 the agent typically exhausts every
+   attribute and spends the rest of the session asking dead questions while returning an unchanged
+   list. Costs nothing today, but it is the Tier-3 turn-budget target and reads badly in a demo.
+3. **State is first-write-wins**, so an intent override appends instead of replacing, and a stale
+   colour/material can keep a wrong hard `AND` filter in place. Needs erase-and-rewrite.
+4. **`user_profile` is ignored entirely** — `reset()` discards it.
+5. **Generic constraints still fail.** When a target's disclosed constraints don't discriminate
+   (*"leather; Imported; Buckle closure"* among hundreds of leather belts), no amount of asking
+   helps. Needs reranking or dense retrieval.
 
 ## Priorities
 
@@ -176,8 +196,8 @@ Cut from the bottom up. Never let a Tier 3 idea pull someone off Tier 1 work.
 | Tier | Drives | Items |
 |---|---|---|
 | 0 | prerequisite | agent contract wired end-to-end; evaluator reproduces a score |
-| 1 | HitRate@10 (50%) | dual-track routing ✅ · multi-route retrieval ✅ · slot memory · **clarification trigger** |
-| 2 | MRR (30%) | hybrid/dense retrieval · semantic reranking · intent override · personalization |
+| 1 | HitRate@10 (50%) | dual-track routing ✅ · multi-route retrieval ✅ · slot memory ✅ · clarification trigger ✅ |
+| 2 | MRR (30%) | **semantic reranking (do this next)** · hybrid/dense retrieval · intent override · personalization |
 | 3 | Efficiency (20%) + feasibility | turn-budget discipline · latency & token logging · offline fallback · boundary handling |
 
 Four roles, split by problem-statement pillar — Retrieval & Routing, Dialog + Ranking, Integration,
