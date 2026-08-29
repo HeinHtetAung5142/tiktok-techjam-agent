@@ -93,6 +93,8 @@ py -m evaluator.local_evaluator                      # full 200-session run -> r
 py -m evaluator.local_evaluator --output foo.json    # write elsewhere
 py tools/score_delta.py <before.json> <after.json>   # markdown delta table for a feature doc
 py tools/feasibility_report.py                       # latency / token / cost disclosure tables
+py tools/offline_check.py                            # full run with the network hard-blocked
+py -m unittest discover -s tests -t . -v             # offline-safety + response-contract tests
 py tools/sweep_constants.py --list                   # show the tunable axes
 py tools/sweep_constants.py --axis A B                # coordinate-descent sweep over those axes
 ```
@@ -156,6 +158,7 @@ starter/retrieval.py       FTS5 index, query routes, RRF fusion
 starter/dialog_state.py    per-session slots, evidence accumulation, question policy
 starter/ranking.py         IDF coverage + phrase reranking over the fused candidate pool
 starter/dense_retrieval.py offline LSA (TF-IDF + Truncated SVD) embeddings, no file I/O
+starter/offline.py         input coercion + the enforced turn_response shape (feature 11)
 ```
 
 Keep the contract surface in `agent.py`; everything else is imported.
@@ -214,6 +217,9 @@ Keep the contract surface in `agent.py`; everything else is imported.
 | `CatalogIndex.phrase_routes` | retrieval.py | the disclosures worth their own query, IDF-weighted |
 | `disclosure_limit` | agent.py | how much of the ranked list this turn is allowed to reveal |
 | `DenseIndex.top_k` / `.similarity_scores` | dense_retrieval.py | LSA nearest-neighbours / per-candidate cosine similarity |
+| `safe_response` / `coerce_response` | offline.py | the one place a `turn_response` shape is built |
+| `coerce_turn` / `coerce_top_k` / `coerce_user_message` | offline.py | absorb hostile arguments before they reach `DialogState` |
+| `catalog_fallback_asins` | offline.py | a valid slate read straight from the catalog, no sqlite |
 
 ## How scoring actually behaves
 
@@ -303,19 +309,17 @@ not survive that; modelling "ask a targeted question, absorb the answer into sta
 3. **The first two turns return a single recommendation** (feature 05). It never costs a find here
    and it is contract-legal, but it is thin UX and reads oddly in a live demo. Disclose it in the
    final report rather than letting a judge find it.
-4. **`respond()` has no broad exception guard.** The `try` at `starter/agent.py:112-117` is
-   `try/finally` for latency timing only — it re-raises. Fault isolation exists at inner layers
-   (reranker, dense route, phrase routes) but **an exception in `DialogState.observe` or in
-   retrieval routes 1–2 escapes `respond()` entirely**, and a raised exception is scored as a miss.
-   Confirmed by direct execution: `observe(None, 1)` raises `TypeError` at
-   `starter/dialog_state.py:104`; a non-`int` `turn` raises at `starter/agent.py:49-50`; and
-   `respond()` before `reset()` raises `RuntimeError` by design (`starter/agent.py:109-110`).
-   The public set never triggers any of these, and the organizer's evaluator catches exceptions
-   anyway (`evaluator/local_evaluator.py:239-244`) — so this is **insurance against a stricter
-   hidden harness, not a known loss.** Fix shape if taken: wrap `_respond` in a broad
-   `except Exception` returning a valid-shaped fallback, coerce `user_message = str(... or "")` and
-   `turn = int(turn)`, and auto-create the session instead of raising. Requires a full re-run
-   confirming 0.912205 is unchanged. Recorded so it is a decision, not a discovery.
+
+*Closed by feature 11 (`docs/features/11-offline-safe-fallback.md`):* **`respond()` had no broad
+exception guard.** It does now, and so does `Agent.__init__` — which mattered more, since the
+evaluator constructs the agent once *outside* its per-turn `try` (`evaluator/local_evaluator.py:311`),
+so a constructor fault cost all 200 sessions rather than one turn. Inputs are coerced
+(`starter/offline.py`), the response shape is enforced in one place, a skipped `reset()` auto-creates
+the session, and failures degrade to the session's last good list → a catalog-wide slate → an empty
+list. Verified score-neutral: all 200 sessions match `results_after_fieldfactors.json` on `hit`,
+`first_hit_turn` and `best_rank`, and `fallback_turns` is 0 across all 566 turns. **Do not "simplify"
+the guard away** — and if `fallback_turns` is ever nonzero on a scored run, that is a regression, not
+the safety net working.
 
 *Demoted (do not re-attempt without new evidence):* **`user_profile` carries no retrieval signal.**
 `reset()` discards it (`starter/agent.py:98-100`; the "may be used for personalization" comment
@@ -361,7 +365,7 @@ Cut from the bottom up. Never let a Tier 3 idea pull someone off Tier 1 work.
 | 0 | prerequisite | agent contract wired end-to-end; evaluator reproduces a score |
 | 1 | HitRate@10 (50%) | dual-track routing ✅ · multi-route retrieval ✅ · slot memory ✅ · clarification trigger ✅ |
 | 2 | MRR (30%) | semantic reranking ✅ · rank-vs-turn arbitrage ✅ · hybrid/dense retrieval ✅ (route only, flat) · intent override ⏸ (measured: no headroom — see Known gaps) · personalization ❌ (measured: profile is degenerate, no retrieval signal — see Known gaps) · **coverage precision term ⏳ (untested — the only open lever, see feature 09)** |
-| 3 | Efficiency (20%) + feasibility | latency & token logging ✅ (feature 08) · offline fallback ✅ (vacuous — there is no online path to fall back from) · boundary handling ✅ (`DECLINE_RE` vs `EXHAUSTED_RE`, `starter/dialog_state.py:56-59`) |
+| 3 | Efficiency (20%) + feasibility | latency & token logging ✅ (feature 08) · offline fallback ✅ (feature 11 — enforced and tested, not vacuous) · fail-soft `respond()` ✅ (feature 11) · boundary handling ✅ (`DECLINE_RE` vs `EXHAUSTED_RE`, `starter/dialog_state.py:56-59`) |
 
 Four roles, split by problem-statement pillar — Retrieval & Routing, Dialog + Ranking, Integration,
 Coordination + Evaluation. **Individual assignments are still TBD.**

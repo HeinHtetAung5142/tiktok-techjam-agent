@@ -8,10 +8,11 @@ a ranked list of parent_asins.
 from __future__ import annotations
 
 import statistics
+import sys
 import time
 from pathlib import Path
 
-from starter import retrieval
+from starter import offline, retrieval
 from starter.dialog_state import DialogState
 from starter.ranking import Reranker
 from starter.retrieval import CatalogIndex
@@ -53,8 +54,15 @@ def disclosure_limit(turn: int, top_k: int, more_evidence_coming: bool) -> int:
 # Token counts we report. Both are honestly zero: this agent makes no model call of any
 # kind, so there is nothing to count -- see `latency_stats()` for the cost that *is* real.
 # Reported as literal zeros rather than omitting `usage`, so the disclosure is explicit
-# ("we used no tokens") rather than merely absent ("they didn't say").
-NO_MODEL_USAGE = {"prompt_tokens": 0, "completion_tokens": 0}
+# ("we used no tokens") rather than merely absent ("they didn't say"). Defined in
+# offline.py, which is also where the response shape is enforced -- one source of truth.
+NO_MODEL_USAGE = offline.NO_MODEL_USAGE
+
+# What the customer sees when a turn fails outright. Says something true and useful
+# rather than surfacing an error: the point of the fallback is that the conversation
+# continues. Plain ASCII, like QUESTIONS in dialog_state.py -- this is read aloud in the
+# demo and shown in terminals whose codepage mangles dashes and quotes.
+FALLBACK_MESSAGE = "Here are the closest matches I have so far."
 
 
 class Agent:
@@ -62,9 +70,40 @@ class Agent:
 
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         construction_started = time.perf_counter()
-        self.index = CatalogIndex(catalog_path)
-        self.reranker = Reranker(self.index)
+        self.catalog_path = catalog_path
+        # Why construction is guarded at all: the evaluator builds the Agent *once*,
+        # outside its per-turn try/except (evaluator/local_evaluator.py:311). An
+        # exception here therefore aborts the entire run -- all 200 sessions -- where the
+        # same fault inside respond() would cost only one turn. A Python without FTS5
+        # compiled in is the realistic trigger, and it is exactly the kind of thing an
+        # unfamiliar judging environment springs on you.
+        self.degraded_reason: str | None = None
+        try:
+            self.index: CatalogIndex | None = CatalogIndex(catalog_path)
+            self.reranker: Reranker | None = Reranker(self.index)
+        except Exception as exc:  # noqa: BLE001 - deliberately broad, see above
+            print(f"[agent] degraded, no catalog index: {exc!r}", file=sys.stderr)
+            self.index = None
+            self.reranker = None
+            self.degraded_reason = repr(exc)
+
+        # Last resort, used only when a turn produced nothing at all. Sourced from the
+        # index when there is one (free -- collected during the build pass) and read
+        # straight from the catalog file when there is not, since in that case anything
+        # depending on sqlite is exactly what just failed.
+        self._fallback_slate: list[dict] = offline.coerce_recommendations(
+            getattr(self.index, "popular_asins", None)
+            or offline.catalog_fallback_asins(catalog_path)
+        )
+
         self._sessions: dict[str, DialogState] = {}
+        # Per session, the last recommendations we successfully produced. If turn 4
+        # blows up, answering with turn 3's list keeps the session alive and scoreable
+        # instead of handing back an empty page.
+        self._last_good: dict[str, list[dict]] = {}
+        # Counted, not just handled: a fallback that fires silently is a bug we would
+        # never find. Read back through latency_stats() -- it must be 0 on the public set.
+        self.fallback_turns = 0
         # Latency is a required feasibility disclosure (docs/submission_rules.md), but it
         # cannot ride along in the response: `turn_response` and `usage` both set
         # "additionalProperties": false in docs/agent_api_contract.json, so an extra
@@ -83,10 +122,16 @@ class Agent:
             return {
                 "turns": 0,
                 "construction_seconds": round(self.construction_seconds, 3),
+                "fallback_turns": self.fallback_turns,
+                "degraded_reason": self.degraded_reason,
             }
         return {
             "turns": len(samples),
             "construction_seconds": round(self.construction_seconds, 3),
+            # Feasibility disclosure, and a canary: any nonzero value means turns were
+            # answered from the fallback path rather than from retrieval.
+            "fallback_turns": self.fallback_turns,
+            "degraded_reason": self.degraded_reason,
             "mean_ms": round(statistics.fmean(samples), 2),
             "median_ms": round(statistics.median(samples), 2),
             # With a few hundred turns, nearest-rank is the honest p95: no interpolation
@@ -96,8 +141,13 @@ class Agent:
         }
 
     def reset(self, session_id: str, user_profile: dict) -> None:
-        # The profile is anonymized and may be used for personalization.
-        self._sessions[session_id] = DialogState()
+        # The profile is anonymized and may be used for personalization. Measured across
+        # all 200 public sessions and found degenerate -- see the demoted note in
+        # CLAUDE.md's Known gaps -- so it is deliberately unused.
+        key = offline.coerce_session_id(session_id)
+        self._sessions[key] = DialogState()
+        # A reused session id must not inherit the previous session's fallback list.
+        self._last_good.pop(key, None)
 
     def respond(
         self,
@@ -106,15 +156,72 @@ class Agent:
         turn: int,
         top_k: int,
     ) -> dict:
-        if session_id not in self._sessions:
-            raise RuntimeError("reset must be called before respond")
+        """Always returns a contract-valid response. Never raises.
+
+        The evaluator scores a raised exception, a malformed payload, or a timeout as an
+        outright miss (evaluator/local_evaluator.py:239-244), so the cost of a fault here
+        is a whole turn -- possibly the turn that would have been the hit. Inner layers
+        already fail soft one at a time (the reranker, the dense route, the phrase
+        routes); this is the outermost net, covering the layers that do not: input
+        coercion, DialogState.observe, and retrieval routes 1-2.
+        """
         turn_started = time.perf_counter()
+        # Seeded before the `try`, and coerced inside it, so that even a coercion fault
+        # lands in the fallback rather than escaping. `coerce_*` guard themselves, but
+        # "the safety net is itself safe" is not a claim worth resting on argument.
+        key = ""
+        top_k_value = offline.DEFAULT_TOP_K
         try:
-            return self._respond(session_id, user_message, turn, top_k)
+            key = offline.coerce_session_id(session_id)
+            top_k_value = offline.coerce_top_k(top_k)
+            payload = self._respond(
+                key,
+                offline.coerce_user_message(user_message),
+                offline.coerce_turn(turn),
+                top_k_value,
+            )
+            if not isinstance(payload, dict):
+                raise TypeError(f"_respond returned {type(payload).__name__}, not dict")
+            response = offline.coerce_response(payload, top_k_value)
+            if not response["recommendations"] and top_k_value > 0:
+                # Retrieval can legitimately return nothing -- an empty query builds no
+                # FTS5 expression (retrieval.py:376) -- but an empty page is an
+                # unscoreable turn either way, so spend it on the slate instead. Not an
+                # error, so it is counted but not logged.
+                self.fallback_turns += 1
+                return self._fallback_response(key, top_k_value)
+            if response["recommendations"]:
+                self._last_good[key] = response["recommendations"]
+            return response
+        except Exception as exc:  # noqa: BLE001 - deliberately broad, see docstring
+            self.fallback_turns += 1
+            print(f"[agent] turn {turn!r} fell back: {exc!r}", file=sys.stderr)
+            return self._fallback_response(key, top_k_value)
         finally:
             # In `finally` so a slow failure is still measured. Timing the failure path is
             # the point: an unrecorded timeout would be exactly the latency worth knowing.
             self._turn_latencies_ms.append((time.perf_counter() - turn_started) * 1000.0)
+
+    def _fallback_response(self, session_id: str, top_k: int) -> dict:
+        """The best valid answer available when the normal path could not produce one.
+
+        Degrades in three steps rather than one: this session's last good list, then the
+        catalog-wide slate, then an empty list. Only the third is unscoreable, and it
+        takes both retrieval *and* the catalog file being unreadable to get there.
+        """
+        ask_attribute = "other"
+        state = self._sessions.get(session_id)
+        if state is not None:
+            try:
+                # "other" is the only attribute that cannot whiff, so it is also the
+                # right default when we have no state to reason from.
+                ask_attribute = state.next_attribute()
+            except Exception:  # noqa: BLE001 - a broken state must not break the fallback
+                ask_attribute = "other"
+        recommendations = self._last_good.get(session_id) or self._fallback_slate
+        return offline.safe_response(
+            FALLBACK_MESSAGE, ask_attribute, recommendations, NO_MODEL_USAGE, top_k
+        )
 
     def _respond(
         self,
@@ -123,7 +230,15 @@ class Agent:
         turn: int,
         top_k: int,
     ) -> dict:
-        state = self._sessions[session_id]
+        if self.index is None or self.reranker is None:
+            raise RuntimeError(f"catalog index unavailable: {self.degraded_reason}")
+
+        # A harness that skips reset() gets a fresh session rather than a RuntimeError.
+        # Refusing to answer helps nobody: an un-reset session is still worth retrieving
+        # for, and the alternative is scored as a miss.
+        state = self._sessions.get(session_id)
+        if state is None:
+            state = self._sessions[session_id] = DialogState()
         state.observe(user_message, turn)
 
         # Query against everything revealed so far, not just this turn's message.

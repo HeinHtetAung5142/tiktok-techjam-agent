@@ -7,12 +7,15 @@ conversations — see dialog_state.py for that.
 
 from __future__ import annotations
 
+import heapq
 import json
 import math
 import re
 import sqlite3
 from pathlib import Path
 from typing import Callable
+
+from starter.offline import FALLBACK_SLATE_SIZE
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -172,7 +175,17 @@ class CatalogIndex:
         self._profile_cache: dict[str, tuple[dict[str, float], str]] = {}
         self._document_frequency_cache: dict[str, int] = {}
         self.dense_index = None
-        self._build_index()
+        # Highest-rated products in the catalog, filled during the build pass below. Only
+        # ever read by the agent's fallback path -- see starter/offline.py.
+        self.popular_asins: list[str] = []
+        try:
+            self._build_index()
+        except Exception:
+            # The connection is opened above, so a build failure would otherwise orphan
+            # it half-populated. Closing before re-raising keeps the degraded path (see
+            # Agent.__init__) from leaking one connection per failed construction.
+            self.connection.close()
+            raise
 
     def _build_index(self) -> None:
         cursor = self.connection.cursor()
@@ -185,10 +198,20 @@ class CatalogIndex:
         batch: list[tuple[str, str, str, str, str, str, str, float | None]] = []
         corpus_texts: list[str] = []
         asin_order: list[str] = []
+        # (review count, id) for every product, so the fallback slate can be the most
+        # reviewed items rather than an arbitrary ten. Collected in this pass because the
+        # rows are already parsed here; a second pass over 50k products for a list that
+        # is never read on the happy path would not be worth a second of startup.
+        popularity: list[tuple[float, str]] = []
         with self.catalog_path.open(encoding="utf-8") as handle:
             for line in handle:
                 product = json.loads(line)
                 parent_asin = str(product["parent_asin"])
+                try:
+                    reviews = float(product.get("rating_number") or 0.0)
+                except (TypeError, ValueError):
+                    reviews = 0.0
+                popularity.append((reviews, parent_asin))
                 fields = (
                     flatten(product.get("title")),
                     flatten(product.get("categories")),
@@ -206,6 +229,13 @@ class CatalogIndex:
         if batch:
             cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?, ?)", batch)
         self.connection.commit()
+
+        # Ties break on the id, so the slate is deterministic across runs and machines.
+        self.popular_asins = [
+            parent_asin
+            for _, parent_asin in heapq.nlargest(FALLBACK_SLATE_SIZE, popularity)
+        ]
+
         self._build_dense_index(corpus_texts, asin_order)
 
         # FTS5 ships its own term statistics. `fts5vocab ... 'row'` exposes, per term, the

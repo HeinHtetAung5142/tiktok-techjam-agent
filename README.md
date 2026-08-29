@@ -148,13 +148,33 @@ Retrieval is entirely local: an in-memory SQLite **FTS5** index plus offline **L
 (TF-IDF + Truncated SVD) computed at construction from the catalog itself. Nothing is downloaded
 at runtime and no pretrained model weights are loaded from disk.
 
-Because official judging may disable network access, note there is **no fallback path to
-describe** — the offline path is the only path, so the agent behaves identically with the network
-disabled.
+Because official judging may disable network access, there is **no online path to fall back from** —
+the offline path is the only path. That is an argument, though, not evidence, so we test it:
+
+```bash
+py tools/offline_check.py
+```
+
+This replays all 200 sessions with every socket operation in the process hard-blocked (a
+`sys.addaudithook` hook plus monkeypatched entry points, installed *before* numpy/scipy/scikit-learn
+are imported) and compares the outcome against the committed reference run session by session. It
+exits non-zero unless the score matches to six decimals, all 200 sessions have an identical hit turn
+and rank, and no turn was answered from a fallback. Current result: **identical, 0/200 sessions
+differing, 0 fallback turns.**
+
+The agent also **degrades rather than fails**. `respond()` never raises: inputs are coerced, the
+response shape is enforced against the contract, and any internal fault falls back to the session's
+last good recommendations, then to a catalog-wide slate, then to an empty list. A missing catalog or
+a Python built without FTS5 degrades the agent instead of aborting the run. See
+`docs/features/11-offline-safe-fallback.md`, and:
+
+```bash
+py -m unittest discover -s tests -t . -v
+```
 
 ### Measured latency
 
-From the 200-session run (574 `respond()` calls), on the machine described above. Regenerate
+From the 200-session run (566 `respond()` calls), on the machine described above. Regenerate
 these numbers at any time with:
 
 ```bash
@@ -187,6 +207,10 @@ starter/retrieval.py        FTS5 index, query routes, RRF fusion
 starter/dialog_state.py     per-session slots, evidence accumulation, question policy
 starter/ranking.py          IDF coverage + phrase reranking over the fused candidate pool
 starter/dense_retrieval.py  offline LSA (TF-IDF + Truncated SVD) embeddings
+starter/offline.py          input coercion + the enforced turn_response shape
+tools/offline_guard.py      hard network block, for proving the agent runs offline
+tools/offline_check.py      full 200-session replay with the network blocked
+tests/test_offline_safety.py  offline-safety and response-contract tests
 requirements.txt            pinned dependencies -- install before running
 ```
 
@@ -203,6 +227,7 @@ docs/features/07-hybrid-dense-retrieval.md      dense LSA route (shipped flat, d
 docs/features/08-feasibility-disclosure.md      latency / token / cost instrumentation
 docs/features/09-optimization-headroom.md       where the remaining points are, and what is closed
 docs/features/10-field-factor-calibration.md    field factors corrected to match the evidence source
+docs/features/11-offline-safe-fallback.md       offline enforcement + fail-soft respond()
 docs/demo-script.md                             narration script for the demo video
 results_after_fieldfactors.json                 committed snapshot of the score of record
 ```
