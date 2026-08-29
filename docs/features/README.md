@@ -70,3 +70,6 @@ What it does not fix, what it made worse, and what should come next.
 | 05 | [Rank-vs-turn arbitrage](05-rank-vs-turn-arbitrage.md) | 2 | 0.898866 |
 | 06 | [Phrase retrieval + constraint bugs](06-phrase-retrieval.md) | 2 | **0.907281** |
 | 07 | [Hybrid/dense retrieval](07-hybrid-dense-retrieval.md) | 2 | 0.906791 (flat) |
+| 08 | [Latency and token-usage disclosure](08-feasibility-disclosure.md) | 3 | 0.906791 (unchanged) |
+| 09 | [Optimization headroom](09-optimization-headroom.md) | 2 | 0.906791 (investigation, no code change) |
+| 10 | [Field-factor calibration](10-field-factor-calibration.md) | 2 | **0.912205** |

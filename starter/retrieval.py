@@ -64,8 +64,17 @@ TEXT_COLUMNS = ("title", "categories", "features", "details", "store", "descript
 FIELD_FACTORS = {
     "title": 1.0,
     "categories": 0.9,
-    "features": 0.85,
-    "details": 0.85,
+    # Parity with `title`, not the 0.85 these carried until feature 10. The customer's
+    # disclosures are generated verbatim *from these two fields* -- `intent_card` builds
+    # its candidate list as features + details (evaluator/local_evaluator.py:53) -- so a
+    # term matched here is at least as diagnostic as one matched in the title, and
+    # discounting it was backwards. Worth +0.0054 on every metric at once.
+    #
+    # 1.0 is a ceiling, not a trend: pushing these to 1.15 *loses* 0.0022 and costs
+    # HitRate outright, and raising `categories` alongside them loses 0.0070. The gain is
+    # specific to the two fields the evidence comes from. See feature 10 for the sweep.
+    "features": 1.0,
+    "details": 1.0,
     "store": 0.7,
     "description": 0.65,
 }

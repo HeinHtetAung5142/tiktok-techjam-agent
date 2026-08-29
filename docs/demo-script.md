@@ -93,9 +93,10 @@ between stills.
 > constraint is now locked in, and the candidate pool drops from «N» to «N».
 >
 > «If the demo session is intent_override — **Turn three.** They change their mind: "actually,
-> ignore my earlier preference." We don't stack that on top of the old one, we overwrite the slot it
-> conflicts with. Getting this wrong is how an agent ends up searching for two contradictory things
-> at once.»
+> ignore my earlier preference." The interesting part is what we *don't* do: we don't try to guess
+> which stored constraint got cancelled. Our phrase and semantic routes deliberately ignore the
+> hard filters, so even when a stale preference is still on file it can't suppress the one route
+> that recognises the product. Override sessions land twenty-nine out of thirty.»
 >
 > **Turn «N».** Target found, rank «N».
 >

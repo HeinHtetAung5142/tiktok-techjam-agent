@@ -77,13 +77,13 @@ produces an identical score. Our agent reproduces:
 
 | Metric | Value |
 |---|---|
-| Hit Rate@10 | 0.975 |
-| MRR | 0.857304 |
-| MTTC | 2.895 |
-| **TechnicalScore** | **0.906791** |
+| Hit Rate@10 | 0.98 |
+| MRR | 0.864018 |
+| MTTC | 2.85 |
+| **TechnicalScore** | **0.912205** |
 
-Per-scenario Hit Rate@10: boundary 1.0 · browsing 0.9875 · intent_override 0.9667 · buying 0.9625.
-The committed snapshot of this run is `results_after_dense.json`.
+Per-scenario Hit Rate@10: boundary 1.0 · browsing 0.9875 · buying 0.975 · intent_override 0.9667.
+The committed snapshot of this run is `results_after_fieldfactors.json`.
 
 For reference, the unmodified weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
 MTTC `9.81` — see `docs/baseline_results.json`.
@@ -200,8 +200,19 @@ docs/features/04-semantic-reranking.md          reranking the fused candidate po
 docs/features/05-rank-vs-turn-arbitrage.md      trading turns for rank
 docs/features/06-phrase-retrieval.md            exact-phrase routes
 docs/features/07-hybrid-dense-retrieval.md      dense LSA route (shipped flat, documented)
+docs/features/08-feasibility-disclosure.md      latency / token / cost instrumentation
+docs/features/09-optimization-headroom.md       where the remaining points are, and what is closed
+docs/features/10-field-factor-calibration.md    field factors corrected to match the evidence source
 docs/demo-script.md                             narration script for the demo video
-results_after_dense.json                        committed snapshot of the score of record
+results_after_fieldfactors.json                 committed snapshot of the score of record
+```
+
+Development tooling (not part of the agent, not needed to reproduce the score):
+
+```text
+tools/score_delta.py        markdown before/after delta table for a feature doc
+tools/feasibility_report.py regenerates the latency / token / cost tables below
+tools/sweep_constants.py    coordinate-descent sweep over the agent's tuned constants
 ```
 
 Organizer-provided, unmodified:

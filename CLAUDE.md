@@ -39,24 +39,45 @@ Metrics are also reported per scenario — always read the breakdown, not just t
 
 ### Score of record
 
-| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_dense.json`) |
+| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_fieldfactors.json`) |
 |---|---|---|
-| HitRate@10 | 0.125 | 0.975 |
-| MRR | 0.068034 | 0.857304 |
-| MTTC | 9.81 | 2.895 |
-| **TechnicalScore** | **0.10671** | **0.906791** |
+| HitRate@10 | 0.125 | 0.98 |
+| MRR | 0.068034 | 0.864018 |
+| MTTC | 9.81 | 2.85 |
+| **TechnicalScore** | **0.10671** | **0.912205** |
 
-Per scenario HitRate@10, current: boundary 1.0 · browsing 0.9875 · intent_override 0.9667 ·
-buying 0.9625.
+Per scenario HitRate@10, current: boundary 1.0 · browsing 0.9875 · buying 0.975 ·
+intent_override 0.9667. `boundary` MRR is a perfect 1.0.
+
+**Treat 0.912205 as 0.906791 plus a marginal rescue, not as a solid +0.005.** Feature 10 raised
+`features`/`details` field factors to parity with `title` -- correct on mechanism, since the
+simulator generates every disclosure from those two fields -- but the public-set gain rests on five
+sessions: `public_0145` scraping in at **rank 10 on turn 5**, plus four rank improvements against
+compensating drift elsewhere (12 sessions improved, 11 worsened). Read
+`docs/features/10-field-factor-calibration.md` before quoting the number.
 
 **Every cheap term is spent.** MRR went 0.652 → 0.852 by trading turns for rank
 (`docs/features/05-rank-vs-turn-arbitrage.md`) and plateaus there; phrase retrieval plus two
 constraint-extraction bug fixes took HitRate to 0.975
-(`docs/features/06-phrase-retrieval.md`). 161 of 195 hits land at rank 1. Hybrid/dense retrieval
+(`docs/features/06-phrase-retrieval.md`); feature 10 then took it to 0.98. 162 of 196 hits land at
+rank 1. Hybrid/dense retrieval
 (`docs/features/07-hybrid-dense-retrieval.md`) shipped as a route only — TechnicalScore moved
 -0.00049, inside the noise floor — after measuring that blending it into the reranker regressed
 MRR monotonically at every nonzero weight tested. Read that doc before touching either number
 above; the plateau is real and measured, not just asserted.
+
+**Where the remaining points actually are** (measured, `docs/features/09-optimization-headroom.md`):
+195 sessions hit, but only 161 at rank 1 — 34 land at ranks 2–8, and **all 34 hit on turn 3 or 4,
+exactly where `DISCLOSURE_SCHEDULE` widens 1 → 4 → 8.** Turns 1–2 disclose a single slot and are
+84/84 at rank 1.
+
+| Pool | Worth in TechnicalScore |
+|---|---|
+| 34 hits at rank 2–8 → rank 1 | **+0.0348** |
+| 4 misses → found | +0.0100 (HitRate) + 0.0060 (MRR) |
+
+So the realistic ceiling with the current miss set is **~0.947**, against 0.912205 today, and the
+rank-2-to-8 pool is worth over 2x the entire miss pool. Chase that, not the misses.
 
 **The 5 remaining misses are not a retrieval problem and cannot be fixed by a better retriever.**
 Their disclosed constraints are shared with thousands of products — `public_0087` discloses only
@@ -71,7 +92,18 @@ spend the remaining time here.
 py -m evaluator.local_evaluator                      # full 200-session run -> results.json
 py -m evaluator.local_evaluator --output foo.json    # write elsewhere
 py tools/score_delta.py <before.json> <after.json>   # markdown delta table for a feature doc
+py tools/feasibility_report.py                       # latency / token / cost disclosure tables
+py tools/sweep_constants.py --list                   # show the tunable axes
+py tools/sweep_constants.py --axis A B                # coordinate-descent sweep over those axes
 ```
+
+**Use `sweep_constants.py`, not repeated evaluator runs, to tune a constant.** It builds one
+`Agent` and reuses it across every variant, so the ~13.5 s index construction is paid once instead
+of per variant — a 30-variant sweep is minutes rather than an hour. It aborts if the control arm
+does not reproduce the score of record exactly, so a broken harness can't quietly produce
+plausible numbers. **Bump `BASELINE` in that file whenever a feature moves the score.**
+Whenever the pipeline changes, the previously fitted argmax is no longer known to be the argmax:
+re-run the affected axes rather than trusting a number tuned against an older stack.
 
 **Use `py`, not `python3`.** On this Windows setup `python` and `python3` resolve to the Microsoft
 Store stub and fail; `py` is the real launcher (Python 3.14.7 on this machine — verify locally,
@@ -132,8 +164,10 @@ Keep the contract surface in `agent.py`; everything else is imported.
   construction. Columns are separately weighted at query time via `bm25()`; `parent_asin` and
   `price` are `UNINDEXED` (price is a numeric filter, not a search term).
 - **Constraint extraction.** `detect_constraints` regex-scrapes color, material, and a price
-  ceiling from each message, merged **first-write-wins** — which is exactly why intent override
-  doesn't work yet (see Known gaps).
+  ceiling from each message, merged **first-write-wins**, so a contradicting value is dropped rather
+  than overwriting. That never got fixed and measurably stopped mattering — the phrase and dense
+  routes bypass the hard filter, so a stale constraint can't suppress the identifying route. See the
+  demoted note in Known gaps before touching it.
 - **Evidence accumulation.** `DialogState.evidence` keeps every disclosure the customer has made,
   oldest first, and the query is built from all of it. Retrieving on the latest message alone throws
   away the product category from turn 1.
@@ -204,6 +238,25 @@ below is derived from `evaluator/local_evaluator.py` — no ground-truth peeking
 - **Disclosures are near-verbatim target text.** Intent cards are built from the target's own
   `features`/`details` (`evaluator/local_evaluator.py:52-71`), so getting the customer to speak is
   getting them to quote the answer. Feed it all straight into the query.
+- **The customer knows at most 4 things, and is drained by turn 3.** This is the single most
+  important mechanism in the file. `intent_card` sets `hard_constraints = cleaned[:2]` and
+  `soft_preferences = cleaned[2:4]` (`evaluator/local_evaluator.py:69-71`), so the entire
+  disclosable pool is **4 constraints**; `customer_reply` returns at most two undisclosed ones per
+  turn (`evaluator/local_evaluator.py:177`). Two `other` questions therefore exhaust the customer
+  completely:
+
+  | Turn | Evidence in hand |
+  |---|---|
+  | 1 | the opening message (category) |
+  | 2 | + 2 constraints |
+  | 3 | + the remaining 2 — **everything obtainable, ever** |
+  | 4+ | *"I don't have an additional preference"* — nothing new arrives |
+
+  **Consequence: no dialog-side strategy can ever beat the current one.** Deferring past turn 3
+  buys zero new information and only costs MTTC; a better `ASK_ORDER` cannot extract a fifth
+  constraint that does not exist. This is why feature 05 measured an MRR plateau at ~0.858 and why
+  no session runs past turn 4 — it is a structural ceiling, not a tuning artifact. Given fixed and
+  complete evidence by turn 3, **the only remaining lever in the whole system is ranking quality.**
 - **The first hit ends the session and freezes the rank.** `evaluator/local_evaluator.py:243`
   `break`s the moment the target appears anywhere in the top 10, so `best_rank` is its rank on that
   turn and no later turn can improve it. Surfacing the target early at a bad rank is therefore a
@@ -225,21 +278,61 @@ not survive that; modelling "ask a targeted question, absorb the answer into sta
 
 ## Known gaps (highest leverage first)
 
-1. **`user_profile` is ignored entirely** — `reset()` discards it (`starter/agent.py:59-61`).
-   Untouched signal, though the fields are abstract (`preference_tags` like "fit", "comfort") and
-   may not identify a product. This is now the top *open* gap, but note it is unproven upside, not a
-   known win.
-2. **All five misses are information-theoretically unreachable:** `public_0020`, `public_0087`,
-   `public_0144`, `public_0145`, `public_0174`. Their disclosed constraints don't discriminate at
+1. **The only open lever: `_coverage` scores recall with no length normalization**
+   (`starter/ranking.py`). It sums `idf * field_factor` over matched terms and divides by
+   `total_mass`, which is constant across candidates — so it measures *how much of the customer's
+   evidence is in this product*, and never *how much of this product is the customer's evidence*.
+   A sprawling listing that happens to contain "100% Cotton" and "Button closure" among forty other
+   features scores identically to a focused listing where those are the whole product. That is
+   exactly the failure shape of the 34 rank-2-to-8 sessions. Adding a precision term (or
+   normalizing by document length) is principled and appears nowhere in features 04–07. **This is
+   the one idea with a real mechanism behind it that has not been tried** — see
+   `docs/features/09-optimization-headroom.md` for the full argument, the headroom arithmetic, and
+   what was already ruled out. Expect it to move a handful of sessions, not all 34; measure, don't
+   assume.
+2. **Four misses remain, and they are information-theoretically unreachable:** `public_0020`,
+   `public_0087`, `public_0144`, `public_0174`. Their disclosed constraints don't discriminate at
    all. Verified in feature 06 — a conjunction route that narrowed the candidate set to 100 still
-   could not order it. `public_0020` and `public_0145` were re-checked directly: both survive the
-   hard `AND` filter and land at rank 15 and 13 after reranking, and *removing the filter entirely*
-   moves them to 14 and 16. **Not worth further retrieval work.**
+   could not order it. `public_0020` was re-checked directly: it survives the hard `AND` filter and
+   lands at rank 15 after reranking; *removing the filter entirely* moves it to 14. **Not worth
+   further retrieval work.**
+
+   This list was five until feature 10. `public_0145` is now a **marginal hit at rank 10 on turn
+   5** — one position from being a miss again. Do not read HitRate 0.98 as robust: it is 0.975 plus
+   a session hanging on the boundary of the cut, and any ranking change can push it back out.
 3. **The first two turns return a single recommendation** (feature 05). It never costs a find here
    and it is contract-legal, but it is thin UX and reads oddly in a live demo. Disclose it in the
    final report rather than letting a judge find it.
+4. **`respond()` has no broad exception guard.** The `try` at `starter/agent.py:112-117` is
+   `try/finally` for latency timing only — it re-raises. Fault isolation exists at inner layers
+   (reranker, dense route, phrase routes) but **an exception in `DialogState.observe` or in
+   retrieval routes 1–2 escapes `respond()` entirely**, and a raised exception is scored as a miss.
+   Confirmed by direct execution: `observe(None, 1)` raises `TypeError` at
+   `starter/dialog_state.py:104`; a non-`int` `turn` raises at `starter/agent.py:49-50`; and
+   `respond()` before `reset()` raises `RuntimeError` by design (`starter/agent.py:109-110`).
+   The public set never triggers any of these, and the organizer's evaluator catches exceptions
+   anyway (`evaluator/local_evaluator.py:239-244`) — so this is **insurance against a stricter
+   hidden harness, not a known loss.** Fix shape if taken: wrap `_respond` in a broad
+   `except Exception` returning a valid-shaped fallback, coerce `user_message = str(... or "")` and
+   `turn = int(turn)`, and auto-create the session instead of raising. Requires a full re-run
+   confirming 0.912205 is unchanged. Recorded so it is a decision, not a discovery.
 
-*Demoted (was gap #1, do not re-attempt without new evidence):* **state is first-write-wins**, so a
+*Demoted (do not re-attempt without new evidence):* **`user_profile` carries no retrieval signal.**
+`reset()` discards it (`starter/agent.py:98-100`; the "may be used for personalization" comment
+there is starter-kit boilerplate, not a description of behaviour) and the parameter appears nowhere
+else in `starter/`. This was listed for several features as the top *open* gap with "unproven
+upside". It has now been measured across all 200 sessions, and the upside is **zero**:
+`purchase_frequency` is the constant `"3-4 prior purchases"` in all 200; `category_bucket` is
+`"clothing"` in all 200; `summary` is mechanically derived from `preference_tags` + `rating_style`;
+`average_prior_rating` and `rating_style` are a perfectly correlated pair describing the *reviewer's
+temperament*, not the product. The only field with any variation is `preference_tags` — 9 values,
+heavily degenerate: `fit` 163/200, `material` 154, `comfort` 144, `style` 101, then a long tail. A
+field present in over half the sessions cannot separate one target from 50,000 products. The only
+defensible use is biasing `ASK_ORDER` (`starter/dialog_state.py:72-75`), and that competes directly
+with the deliberate `"other"`-first design — `other` is the only attribute that cannot whiff. There
+is no personalization win here; spend the time on the submission artifacts instead.
+
+*Demoted (an earlier gap #1, do not re-attempt without new evidence):* **state is first-write-wins**, so a
 contradicting value lands in a filled slot and is dropped (`starter/dialog_state.py:125-132`). The
 claim that this had "measured victims" in `public_0020`/`public_0145` was **wrong** — both are
 `buying` sessions, which never receive an override message at all, and neither is excluded by the
@@ -267,8 +360,8 @@ Cut from the bottom up. Never let a Tier 3 idea pull someone off Tier 1 work.
 |---|---|---|
 | 0 | prerequisite | agent contract wired end-to-end; evaluator reproduces a score |
 | 1 | HitRate@10 (50%) | dual-track routing ✅ · multi-route retrieval ✅ · slot memory ✅ · clarification trigger ✅ |
-| 2 | MRR (30%) | semantic reranking ✅ · rank-vs-turn arbitrage ✅ · hybrid/dense retrieval ✅ (route only, flat) · intent override ⏸ (measured: no headroom — see Known gaps) · personalization |
-| 3 | Efficiency (20%) + feasibility | latency & token logging · offline fallback · boundary handling |
+| 2 | MRR (30%) | semantic reranking ✅ · rank-vs-turn arbitrage ✅ · hybrid/dense retrieval ✅ (route only, flat) · intent override ⏸ (measured: no headroom — see Known gaps) · personalization ❌ (measured: profile is degenerate, no retrieval signal — see Known gaps) · **coverage precision term ⏳ (untested — the only open lever, see feature 09)** |
+| 3 | Efficiency (20%) + feasibility | latency & token logging ✅ (feature 08) · offline fallback ✅ (vacuous — there is no online path to fall back from) · boundary handling ✅ (`DECLINE_RE` vs `EXHAUSTED_RE`, `starter/dialog_state.py:56-59`) |
 
 Four roles, split by problem-statement pillar — Retrieval & Routing, Dialog + Ranking, Integration,
 Coordination + Evaluation. **Individual assignments are still TBD.**
