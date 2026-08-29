@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shopping Copilot — live session</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot"></span>
+    <h1>Shopping Copilot</h1>
+    <span class="sub">TikTok TechJam 2026 · local session</span>
+  </div>
+  <div class="stats" id="stats">
+    <span class="chip">turn <b id="stat-turn">0</b>/<span id="stat-maxturn">10</span></span>
+    <span class="chip">latency <b id="stat-latency">—</b></span>
+    <span class="chip">tokens <b id="stat-tokens">0</b></span>
+  </div>
+</header>
+
+<section class="target" id="target">
+  <div class="target-head">
+    <div class="target-label">
+      <span class="tag">TARGET</span>
+      <span class="hint">Describe this in your own words — don't paste it. The agent never sees it.</span>
+    </div>
+    <div class="target-actions">
+      <div class="toggle" role="tablist">
+        <button id="view-card" class="on" role="tab">intent card</button>
+        <button id="view-full" role="tab">full details</button>
+      </div>
+      <button id="reroll" class="btn">Next random ↻</button>
+    </div>
+  </div>
+  <div class="target-body" id="target-body">
+    <p class="muted">Drawing a product…</p>
+  </div>
+  <div class="found" id="found" hidden></div>
+</section>
+
+<main class="layout">
+
+  <section class="panel ranking">
+    <div class="panel-head">
+      <h2>Ranking</h2>
+      <span class="panel-note" id="rank-note">no results yet</span>
+    </div>
+    <div class="rank-scroll" id="rank-list">
+      <p class="empty">Send a message to see what the agent retrieves.</p>
+    </div>
+  </section>
+
+  <section class="panel chat">
+    <div class="panel-head">
+      <h2>Conversation</h2>
+      <button id="reset" class="btn ghost">Reset chat</button>
+    </div>
+    <div class="transcript" id="transcript"></div>
+    <form class="composer" id="composer">
+      <input id="input" type="text" autocomplete="off" placeholder="e.g. I'm looking for a men's cotton flannel shirt">
+      <button id="send" class="btn primary" type="submit">Send</button>
+    </form>
+    <p class="composer-note" id="composer-note"></p>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
