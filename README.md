@@ -32,19 +32,64 @@ mv catalog.jsonl data/catalog.jsonl
 
 Verify the downloaded file using the published `SHA256SUMS` file.
 
-## Run the Starter
+## Setup and Reproduction
 
-Python 3.10 or later is recommended. The starter uses only the Python standard library.
+**Python 3.10 or later.** Developed and verified on 3.14.7.
+
+### 1. Install dependencies — required
+
+```bash
+pip install -r requirements.txt
+```
+
+This installs `numpy`, `scikit-learn`, and `scipy` (a transitive dependency of scikit-learn,
+pinned to the version this agent was verified against). They are used by the dense-retrieval
+route in `starter/dense_retrieval.py`. **The agent will not import without them.**
+
+Versions are pinned exactly. If you install different versions the run may still work, but it is
+no longer the configuration we validated.
+
+### 2. Download the catalog
+
+Follow *Download the Catalog* above so `data/catalog.jsonl` exists (50,000 rows) before running.
+
+### 3. Run the evaluator — one command
 
 ```bash
 python3 -m evaluator.local_evaluator
 ```
 
-Edit `starter/agent.py` to implement your system. Do not edit the evaluator or public labels when reporting your local score.
-The command writes per-session results and aggregate metrics to `results.json`.
+On Windows, `python` and `python3` may resolve to the Microsoft Store stub and fail. Use the real
+launcher instead — the module path is identical:
 
-The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
-MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
+```bash
+py -m evaluator.local_evaluator
+```
+
+Writes per-session results and aggregate metrics to `results.json`, and prints the aggregate plus
+per-scenario breakdown to stdout. No environment variables, no API keys, no network access
+required — see *Model Choice and Cost* below.
+
+### Expected result
+
+A full 200-session run takes roughly **35 seconds** and is deterministic — identical code always
+produces an identical score. Our agent reproduces:
+
+| Metric | Value |
+|---|---|
+| Hit Rate@10 | 0.975 |
+| MRR | 0.857304 |
+| MTTC | 2.895 |
+| **TechnicalScore** | **0.906791** |
+
+Per-scenario Hit Rate@10: boundary 1.0 · browsing 0.9875 · intent_override 0.9667 · buying 0.9625.
+The committed snapshot of this run is `results_after_dense.json`.
+
+For reference, the unmodified weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
+MTTC `9.81` — see `docs/baseline_results.json`.
+
+Edit `starter/agent.py` to implement your system. Do not edit the evaluator or public labels when
+reporting your local score.
 
 ## Agent Interface
 
@@ -83,27 +128,103 @@ Only exact `parent_asin` equality produces a hit. Core metrics are also reported
 
 ## Model Choice and Cost
 
-Teams may use any legally accessible LLM API or local model. Teams manage their own credentials and must never commit API keys. Model choice, estimated cost, token usage, and latency must be disclosed. Token usage is a feasibility metric, not part of the core technical score. The organizer may reimburse model costs through prizes instead of issuing API keys.
+Organizer policy: teams may use any legally accessible LLM API or local model, must manage their own
+credentials, and must never commit API keys. Model choice, estimated cost, token usage, and latency
+must be disclosed. Token usage is a feasibility metric, not part of the core technical score.
+
+### Our disclosure
+
+**No model. No network. No credentials. No cost.**
+
+| Item | Value |
+|---|---|
+| LLM / external API | **None** — no API calls of any kind |
+| Network access required | **None.** Runs fully offline |
+| API keys / environment variables | **None** |
+| Estimated model cost | **$0.00** |
+| Reported token usage | `0` prompt, `0` completion — honestly zero, not unreported |
+
+Retrieval is entirely local: an in-memory SQLite **FTS5** index plus offline **LSA** embeddings
+(TF-IDF + Truncated SVD) computed at construction from the catalog itself. Nothing is downloaded
+at runtime and no pretrained model weights are loaded from disk.
+
+Because official judging may disable network access, note there is **no fallback path to
+describe** — the offline path is the only path, so the agent behaves identically with the network
+disabled.
+
+### Measured latency
+
+From the 200-session run (574 `respond()` calls), on the machine described above. Regenerate
+these numbers at any time with:
+
+```bash
+py tools/feasibility_report.py
+```
+
+| Stage | Time |
+|---|---|
+| `Agent()` construction (FTS5 index + LSA embeddings) | **~13.5 s**, one-time at startup |
+| `respond()` — mean | **~55 ms** |
+| `respond()` — median | **~44 ms** |
+| `respond()` — p95 | **~130 ms** |
+| `respond()` — max | 240–400 ms |
+| Full 200-session run, end to end | **~35 s** |
+
+Construction cost is paid once per process, not per session or per turn.
+
+Unlike the score, **these timings are not deterministic** — they move with machine load and cache
+state. Figures above are typical of three consecutive runs on the development machine; the mean was
+stable to within ~3 ms across them, while the single worst-case turn ranged 240–400 ms. Treat them
+as representative, not exact. The score, by contrast, reproduces bit-for-bit.
 
 ## Files
 
+Our agent — the submitted system:
+
 ```text
+starter/agent.py            orchestration + the official reset()/respond() contract
+starter/retrieval.py        FTS5 index, query routes, RRF fusion
+starter/dialog_state.py     per-session slots, evidence accumulation, question policy
+starter/ranking.py          IDF coverage + phrase reranking over the fused candidate pool
+starter/dense_retrieval.py  offline LSA (TF-IDF + Truncated SVD) embeddings
+requirements.txt            pinned dependencies -- install before running
+```
+
+How it was built, feature by feature, each with a measured before/after score delta:
+
+```text
+docs/features/01-dual-track-intent-routing.md   Buying vs Browsing routing
+docs/features/02-multi-route-retrieval.md       keyword + category routes, RRF fusion
+docs/features/03-clarification-loop.md          targeted questions, evidence accumulation
+docs/features/04-semantic-reranking.md          reranking the fused candidate pool
+docs/features/05-rank-vs-turn-arbitrage.md      trading turns for rank
+docs/features/06-phrase-retrieval.md            exact-phrase routes
+docs/features/07-hybrid-dense-retrieval.md      dense LSA route (shipped flat, documented)
+docs/demo-script.md                             narration script for the demo video
+results_after_dense.json                        committed snapshot of the score of record
+```
+
+Organizer-provided, unmodified:
+
+```text
+data/catalog.jsonl                50,000 frozen products (downloaded separately)
 data/public_set.jsonl             200 labeled development sessions
 docs/competition_specification.md participant rules and evaluation protocol
+docs/submission_rules.md          participant submission requirements
 docs/agent_api_contract.json      machine-readable Agent contract
 docs/evaluation_config.json       scoring configuration
 docs/baseline_results.json        reproducible weak-starter reference score
-starter/agent.py                  editable weak starter
 evaluator/local_evaluator.py      public-set simulator and scorer
 ```
 
 ## Judging and Submission Policy
 
 - Participant submission requirements: `docs/submission_rules.md`
-- Participant release checklist: `docs/participant_release_checklist.md`
-- Organizer-only final judging controls: `organizer/JUDGING_RUNBOOK.md`
-- Organizer private release checklist: `organizer/private_release_checklist.md`
-- Judging day operations SOP: `organizer/JUDGING_DAY_SOP.md`
+- Evaluation protocol and metrics: `docs/competition_specification.md`
+
+Organizer-side judging runbooks referenced in the original starter README
+(`organizer/JUDGING_RUNBOOK.md` and similar) are not distributed to participants and are not
+present in this repository.
 
 ## Data Source
 

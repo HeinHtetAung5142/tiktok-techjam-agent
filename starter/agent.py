@@ -7,6 +7,8 @@ a ranked list of parent_asins.
 
 from __future__ import annotations
 
+import statistics
+import time
 from pathlib import Path
 
 from starter import retrieval
@@ -48,13 +50,50 @@ def disclosure_limit(turn: int, top_k: int, more_evidence_coming: bool) -> int:
     return min(DISCLOSURE_SCHEDULE[index], top_k)
 
 
+# Token counts we report. Both are honestly zero: this agent makes no model call of any
+# kind, so there is nothing to count -- see `latency_stats()` for the cost that *is* real.
+# Reported as literal zeros rather than omitting `usage`, so the disclosure is explicit
+# ("we used no tokens") rather than merely absent ("they didn't say").
+NO_MODEL_USAGE = {"prompt_tokens": 0, "completion_tokens": 0}
+
+
 class Agent:
     """Multi-turn shopping agent: FTS5 retrieval, no LLM, no network."""
 
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
+        construction_started = time.perf_counter()
         self.index = CatalogIndex(catalog_path)
         self.reranker = Reranker(self.index)
         self._sessions: dict[str, DialogState] = {}
+        # Latency is a required feasibility disclosure (docs/submission_rules.md), but it
+        # cannot ride along in the response: `turn_response` and `usage` both set
+        # "additionalProperties": false in docs/agent_api_contract.json, so an extra
+        # latency key would be malformed output -- scored as a miss. Keep it here instead
+        # and read it out of the process afterwards via latency_stats().
+        self.construction_seconds = time.perf_counter() - construction_started
+        self._turn_latencies_ms: list[float] = []
+
+    def latency_stats(self) -> dict:
+        """Per-turn latency summary for the feasibility disclosure.
+
+        Never part of the response payload -- see the note in __init__.
+        """
+        samples = sorted(self._turn_latencies_ms)
+        if not samples:
+            return {
+                "turns": 0,
+                "construction_seconds": round(self.construction_seconds, 3),
+            }
+        return {
+            "turns": len(samples),
+            "construction_seconds": round(self.construction_seconds, 3),
+            "mean_ms": round(statistics.fmean(samples), 2),
+            "median_ms": round(statistics.median(samples), 2),
+            # With a few hundred turns, nearest-rank is the honest p95: no interpolation
+            # between samples we never actually observed.
+            "p95_ms": round(samples[min(int(len(samples) * 0.95), len(samples) - 1)], 2),
+            "max_ms": round(samples[-1], 2),
+        }
 
     def reset(self, session_id: str, user_profile: dict) -> None:
         # The profile is anonymized and may be used for personalization.
@@ -69,6 +108,21 @@ class Agent:
     ) -> dict:
         if session_id not in self._sessions:
             raise RuntimeError("reset must be called before respond")
+        turn_started = time.perf_counter()
+        try:
+            return self._respond(session_id, user_message, turn, top_k)
+        finally:
+            # In `finally` so a slow failure is still measured. Timing the failure path is
+            # the point: an unrecorded timeout would be exactly the latency worth knowing.
+            self._turn_latencies_ms.append((time.perf_counter() - turn_started) * 1000.0)
+
+    def _respond(
+        self,
+        session_id: str,
+        user_message: str,
+        turn: int,
+        top_k: int,
+    ) -> dict:
         state = self._sessions[session_id]
         state.observe(user_message, turn)
 
@@ -103,5 +157,7 @@ class Agent:
             "message": state.message(ask_attribute),
             "ask_attribute": ask_attribute,
             "recommendations": recommendations,
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+            # Fresh dict per turn: the evaluator accumulates these, and handing out a
+            # shared module-level object invites a caller mutating every turn's usage.
+            "usage": dict(NO_MODEL_USAGE),
         }

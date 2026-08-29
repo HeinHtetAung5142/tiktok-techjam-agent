@@ -83,8 +83,11 @@ construction, then 200 sessions replay against it. It was ~60s before reranking 
 disclosure (feature 05) added a few seconds back, since sessions now deliberately run a turn or two
 longer to buy rank, and the phrase routes (feature 06) add a handful of extra FTS5 queries per turn.
 
-`requirements.txt` is currently **empty** — the agent is pure standard library. Anything added must
-be pinned there, or the organizer cannot reproduce the run.
+`requirements.txt` pins **`numpy`, `scipy`, `scikit-learn`** — added for the dense route in feature
+07, and the project's only third-party dependencies. Everything else is standard library, and there
+is still no network call anywhere in the agent. Anything further added must be pinned there too, or
+the organizer cannot reproduce the run: `pip install -r requirements.txt` is a required step in our
+setup instructions, not an optional one.
 
 ## Hard rules
 
@@ -222,21 +225,38 @@ not survive that; modelling "ask a targeted question, absorb the answer into sta
 
 ## Known gaps (highest leverage first)
 
-1. **State is first-write-wins**, so an intent override appends instead of replacing, and a stale
-   colour/material keeps a wrong hard `AND` filter in place. This is now the top gap and it has
-   *measured* victims: `public_0020` and `public_0145` are missed because a scraped colour excludes
-   the target's own text. Needs erase-and-rewrite.
-2. **`user_profile` is ignored entirely** — `reset()` discards it. Untouched signal, though the
-   fields are abstract (`preference_tags` like "fit", "comfort") and may not identify a product.
-3. **Five misses are information-theoretically unreachable.** Their disclosed constraints don't
-   discriminate at all. Verified in feature 06 — a conjunction route that narrowed the candidate
-   set to 100 still could not order it. **Not worth further retrieval work.**
-4. **The first two turns return a single recommendation** (feature 05). It never costs a find here
+1. **`user_profile` is ignored entirely** — `reset()` discards it (`starter/agent.py:59-61`).
+   Untouched signal, though the fields are abstract (`preference_tags` like "fit", "comfort") and
+   may not identify a product. This is now the top *open* gap, but note it is unproven upside, not a
+   known win.
+2. **All five misses are information-theoretically unreachable:** `public_0020`, `public_0087`,
+   `public_0144`, `public_0145`, `public_0174`. Their disclosed constraints don't discriminate at
+   all. Verified in feature 06 — a conjunction route that narrowed the candidate set to 100 still
+   could not order it. `public_0020` and `public_0145` were re-checked directly: both survive the
+   hard `AND` filter and land at rank 15 and 13 after reranking, and *removing the filter entirely*
+   moves them to 14 and 16. **Not worth further retrieval work.**
+3. **The first two turns return a single recommendation** (feature 05). It never costs a find here
    and it is contract-legal, but it is thin UX and reads oddly in a live demo. Disclose it in the
    final report rather than letting a judge find it.
 
+*Demoted (was gap #1, do not re-attempt without new evidence):* **state is first-write-wins**, so a
+contradicting value lands in a filled slot and is dropped (`starter/dialog_state.py:125-132`). The
+claim that this had "measured victims" in `public_0020`/`public_0145` was **wrong** — both are
+`buying` sessions, which never receive an override message at all, and neither is excluded by the
+filter (see gap 2). Instrumenting `DialogState.observe` over a full run shows the drop fires in
+**3 of 200 sessions and is benign in every one** — all three are multi-material listings where the
+retained value is still correct (`leather`←"Polyester lining", `cotton`←"Polyester,Cotton,Spandex",
+`spandex`←"92% Polyester, 8% Spandex"), and none is among the five misses. No public-set session
+loses a genuine correction to this. `intent_override` sits at 29/30 with MRR 0.851 and 24 of 29 hits
+at rank 1, because the phrase and dense routes deliberately bypass the `AND` filter
+(`starter/retrieval.py:392-411`) — which is *why* the bug stopped mattering without being fixed.
+If anyone wants erase-and-rewrite as **private-set insurance** (800 sessions, 4x ours, spec permits
+added paraphrasing), the hook already exists: `OVERRIDE_RE` (`starter/dialog_state.py:47`) is
+matched at line 151 but never used to clear slots. Gate it on a full re-run showing
+`intent_override` holds at or above 0.967 — it is downside-only against the public set.
+
 *Removed:* "turns are wasted once evidence runs dry" was listed here for three features and was
-never true — no session runs past turn 4 except the 7 misses. It is now deliberately false in the
+never true — no session runs past turn 4 except the 5 misses. It is now deliberately false in the
 other direction: feature 05 spends those turns on purpose.
 
 ## Priorities
@@ -247,7 +267,7 @@ Cut from the bottom up. Never let a Tier 3 idea pull someone off Tier 1 work.
 |---|---|---|
 | 0 | prerequisite | agent contract wired end-to-end; evaluator reproduces a score |
 | 1 | HitRate@10 (50%) | dual-track routing ✅ · multi-route retrieval ✅ · slot memory ✅ · clarification trigger ✅ |
-| 2 | MRR (30%) | semantic reranking ✅ · rank-vs-turn arbitrage ✅ · hybrid/dense retrieval ✅ (route only, flat) · intent override · personalization |
+| 2 | MRR (30%) | semantic reranking ✅ · rank-vs-turn arbitrage ✅ · hybrid/dense retrieval ✅ (route only, flat) · intent override ⏸ (measured: no headroom — see Known gaps) · personalization |
 | 3 | Efficiency (20%) + feasibility | latency & token logging · offline fallback · boundary handling |
 
 Four roles, split by problem-statement pillar — Retrieval & Routing, Dialog + Ranking, Integration,
