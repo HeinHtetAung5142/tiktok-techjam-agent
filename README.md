@@ -16,7 +16,9 @@ The organizer keeps 800 additional sessions private for final evaluation.
 For each session, your agent receives an anonymized preference profile and a short customer message. Raw user IDs, review text, timestamps, and purchase history are never disclosed. On every turn the agent may:
 
 - ask a natural clarification question in `message` and identify one requested field in `ask_attribute`;
-- return a ranked list of up to 10 catalog `parent_asin` values;
+- return a ranked list of catalog `parent_asin` values, best first — the contract allows up to 100
+  (`recommendations.maxItems`), of which only the first 10 valid, unique, in-catalog ids are scored
+  (`evaluator/local_evaluator.py:95-109`);
 - do both in the same response.
 
 The session ends when the target product appears in the scored Top 10 or after turn 10. Sessions cover Buying, Browsing, Intent Override, and Boundary behavior.
@@ -34,7 +36,8 @@ Verify the downloaded file using the published `SHA256SUMS` file.
 
 ## Setup and Reproduction
 
-**Python 3.10 or later.** Developed and verified on 3.14.7.
+**Python 3.10 or later.** Verified here on **3.14.7** and **3.12.0**. 3.10 and 3.11 are the declared
+floor but have not been run — treat them as expected-to-work, not tested.
 
 ### 1. Install dependencies — required
 
@@ -44,7 +47,20 @@ pip install -r requirements.txt
 
 This installs `numpy`, `scikit-learn`, and `scipy` (a transitive dependency of scikit-learn,
 pinned to the version this agent was verified against). They are used by the dense-retrieval
-route in `starter/dense_retrieval.py`. **The agent will not import without them.**
+route in `starter/dense_retrieval.py`.
+
+**The agent still imports and runs without them — which is exactly why this step is required.**
+`CatalogIndex._build_dense_index` imports `DenseIndex` lazily inside a broad `try/except`
+(`starter/retrieval.py:227-242`) so a missing or broken stack degrades to sparse-only retrieval
+instead of taking the agent down. The only symptom is a single line on stderr:
+
+```text
+[dense_retrieval] disabled: ModuleNotFoundError("No module named 'numpy'")
+```
+
+Miss that line and the run looks entirely normal while scoring a different agent. Measured on the
+200-session public set, sparse-only returns TechnicalScore **0.909858** against the **0.912205** of
+record — a one-session difference, small enough to be mistaken for noise.
 
 Versions are pinned exactly. If you install different versions the run may still work, but it is
 no longer the configuration we validated.
@@ -72,8 +88,8 @@ required — see *Model Choice and Cost* below.
 
 ### Expected result
 
-A full 200-session run takes roughly **35 seconds** and is deterministic — identical code always
-produces an identical score. Our agent reproduces:
+A full 200-session run takes roughly **23 seconds** (23.2–23.4 s across three consecutive runs) and
+is deterministic — identical code always produces an identical score. Our agent reproduces:
 
 | Metric | Value |
 |---|---|
@@ -154,8 +170,9 @@ disabled.
 
 ### Measured latency
 
-From the 200-session run (574 `respond()` calls), on the machine described above. Regenerate
-these numbers at any time with:
+From the 200-session run (**566** `respond()` calls — 196 sessions end on their hit turn, 4 misses
+run the full 10), measured on the development machine: Windows 11, Python 3.14.7. Regenerate these
+numbers at any time with:
 
 ```bash
 py tools/feasibility_report.py
@@ -163,19 +180,20 @@ py tools/feasibility_report.py
 
 | Stage | Time |
 |---|---|
-| `Agent()` construction (FTS5 index + LSA embeddings) | **~13.5 s**, one-time at startup |
-| `respond()` — mean | **~55 ms** |
-| `respond()` — median | **~44 ms** |
-| `respond()` — p95 | **~130 ms** |
-| `respond()` — max | 240–400 ms |
-| Full 200-session run, end to end | **~35 s** |
+| `Agent()` construction (FTS5 index + LSA embeddings) | **~6 s**, one-time at startup |
+| `respond()` — mean | **~31 ms** |
+| `respond()` — median | **~25 ms** |
+| `respond()` — p95 | **~70 ms** |
+| `respond()` — max | 138–153 ms |
+| Full 200-session run, end to end | **~23 s** |
 
 Construction cost is paid once per process, not per session or per turn.
 
 Unlike the score, **these timings are not deterministic** — they move with machine load and cache
-state. Figures above are typical of three consecutive runs on the development machine; the mean was
-stable to within ~3 ms across them, while the single worst-case turn ranged 240–400 ms. Treat them
-as representative, not exact. The score, by contrast, reproduces bit-for-bit.
+state. Figures above are typical of four consecutive runs on the development machine; the mean was
+stable within ~1 ms across them (30.6–31.7 ms) and construction within ~0.3 s (5.7–6.0 s), while the
+single worst-case turn ranged 138–153 ms. Treat them as representative, not exact. The score, by
+contrast, reproduces bit-for-bit.
 
 ## Files
 
@@ -211,8 +229,12 @@ Development tooling (not part of the agent, not needed to reproduce the score):
 
 ```text
 tools/score_delta.py        markdown before/after delta table for a feature doc
-tools/feasibility_report.py regenerates the latency / token / cost tables below
+tools/feasibility_report.py regenerates the latency / token / cost tables above
 tools/sweep_constants.py    coordinate-descent sweep over the agent's tuned constants
+tools/git-hooks/post-merge  rebuilds the knowledge graph after a merge (setup in CLAUDE.md)
+webui/                      optional local web UI for hand-driven sessions; stdlib only,
+                            adds no dependency, delete the directory to remove it entirely
+                            (webui/README.md)
 ```
 
 Organizer-provided, unmodified:

@@ -124,9 +124,15 @@ From the 200-session run (574 `respond()` calls). Regenerate at any time with
 - **Runtime is offline, but installation is not.** The disclosure's "no network access" claim is
   about *runtime*, and it is correct — there are zero network imports in `starter/`. But
   `pip install -r requirements.txt` needs the network at **install** time to fetch numpy, scipy,
-  and scikit-learn, and `README.md:47` notes the agent will not import without them. If the
-  organizer's environment is network-isolated end to end, dependencies must be pre-provisioned.
-  This deserves one honest sentence in the final report.
+  and scikit-learn. If the organizer's environment is network-isolated end to end, dependencies must
+  be pre-provisioned. This deserves one honest sentence in the final report.
+  *(Corrected 2026-08-30: this bullet used to cite `README.md:47` for the claim that "the agent will
+  not import without them". That was wrong, and so was the README line it quoted.
+  `_build_dense_index` imports `DenseIndex` inside a broad `try/except`
+  (`starter/retrieval.py:227-242`), so a missing stack silently degrades to sparse-only retrieval —
+  verified by running the full public set with none of the three installed: it completes and scores
+  0.909858 instead of 0.912205. The risk is a quiet wrong number, not a crash, which makes
+  pre-provisioning **more** important, not less.)*
 - **An unrelated change rode along in this commit:** the `scipy` pin was downgraded
   `1.18.1 → 1.18.0`. It has nothing to do with the feature and should not be read as one.
 - **The wheel-availability claim is asserted, not verified.** `README.md:37` advertises "Python 3.10
