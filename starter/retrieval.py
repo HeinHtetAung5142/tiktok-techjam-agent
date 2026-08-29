@@ -25,6 +25,15 @@ STOPWORDS = {
 OVERFETCH_MULT = 5
 CATEGORY_ROUTE_WEIGHT = 0.3
 
+# Dense (LSA) route. Fits offline from the catalog itself -- see dense_retrieval.py for
+# why this is a smoothed version of the same term statistics coverage already uses, not
+# an independent signal. Measured flat against the public set: HitRate@10 unchanged at
+# 0.975, TechnicalScore within noise of baseline (0.906791 vs 0.907281). 0.5 regressed
+# one session (HitRate 0.97) via the same RRF-dilution risk the rejected conjunction
+# route hit in feature 06 -- a stronger route can now outrank a sparse route's correct
+# pick, not just add candidates. 0.3 is the highest weight tested that didn't cost a hit.
+DENSE_ROUTE_WEIGHT = 0.3
+
 # Phrase route. The keyword route dissolves every disclosure into a bag of terms, so a
 # product carrying the customer's exact wording is scored by BM25 against a ~60-term OR
 # and can sit below the fetch limit among thousands of equally-partial matches. Measured
@@ -153,6 +162,7 @@ class CatalogIndex:
         self.document_count = 0
         self._profile_cache: dict[str, tuple[dict[str, float], str]] = {}
         self._document_frequency_cache: dict[str, int] = {}
+        self.dense_index = None
         self._build_index()
 
     def _build_index(self) -> None:
@@ -164,27 +174,30 @@ class CatalogIndex:
             "tokenize='unicode61 remove_diacritics 2')"
         )
         batch: list[tuple[str, str, str, str, str, str, str, float | None]] = []
+        corpus_texts: list[str] = []
+        asin_order: list[str] = []
         with self.catalog_path.open(encoding="utf-8") as handle:
             for line in handle:
                 product = json.loads(line)
-                batch.append(
-                    (
-                        str(product["parent_asin"]),
-                        flatten(product.get("title")),
-                        flatten(product.get("categories")),
-                        flatten(product.get("features")),
-                        flatten(product.get("details")),
-                        flatten(product.get("store")),
-                        flatten(product.get("description")),
-                        product.get("price"),
-                    )
+                parent_asin = str(product["parent_asin"])
+                fields = (
+                    flatten(product.get("title")),
+                    flatten(product.get("categories")),
+                    flatten(product.get("features")),
+                    flatten(product.get("details")),
+                    flatten(product.get("store")),
+                    flatten(product.get("description")),
                 )
+                batch.append((parent_asin, *fields, product.get("price")))
+                corpus_texts.append(" ".join(fields))
+                asin_order.append(parent_asin)
                 if len(batch) >= 1000:
                     cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?, ?)", batch)
                     batch.clear()
         if batch:
             cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?, ?)", batch)
         self.connection.commit()
+        self._build_dense_index(corpus_texts, asin_order)
 
         # FTS5 ships its own term statistics. `fts5vocab ... 'row'` exposes, per term, the
         # number of documents containing it -- exactly the document frequency reranking
@@ -201,6 +214,23 @@ class CatalogIndex:
             )
         }
         self.document_count = len(self.rowid_by_asin)
+
+    def _build_dense_index(self, corpus_texts: list[str], asin_order: list[str]) -> None:
+        """Fit the LSA dense index, or leave it disabled on any failure.
+
+        A missing/broken numpy-scipy-scikit-learn stack must degrade to sparse-only
+        retrieval, not take the whole agent down -- this mirrors the reranker's own
+        fail-soft contract in retrieve() below.
+        """
+        try:
+            from starter.dense_retrieval import DenseIndex
+
+            self.dense_index = DenseIndex(corpus_texts, asin_order)
+        except Exception as exc:  # noqa: BLE001 - deliberately broad, see docstring
+            import sys
+
+            print(f"[dense_retrieval] disabled: {exc!r}", file=sys.stderr)
+            self.dense_index = None
 
     def document_frequency(self, term: str) -> int:
         """How many catalog products contain `term` anywhere."""
@@ -366,6 +396,19 @@ class CatalogIndex:
             # filter must not be able to suppress the one route that identifies the
             # product. Fusion and reranking still have to agree before it surfaces.
             routes.append((self.run_ranked_query(expression, None, limit), weight))
+
+        # Route 4: dense (LSA) route -- catches semantically related products the
+        # lexical routes miss entirely (paraphrase, synonymy), same unfiltered rationale
+        # as phrase routes. New failure surface gets its own try/except: a transform bug
+        # here must cost only this route, never the whole retrieve() call.
+        if self.dense_index is not None:
+            try:
+                dense_query_text = " ".join(phrases) if phrases else " ".join(query_terms)
+                dense_ids = self.dense_index.top_k(dense_query_text, limit)
+            except Exception:
+                dense_ids = []
+            if dense_ids:
+                routes.append((dense_ids, DENSE_ROUTE_WEIGHT))
 
         merged = self.fuse_rankings(routes, pool_k)
 

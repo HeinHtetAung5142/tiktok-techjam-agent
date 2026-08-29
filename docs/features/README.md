@@ -69,3 +69,4 @@ What it does not fix, what it made worse, and what should come next.
 | 04 | [Semantic reranking](04-semantic-reranking.md) | 2 | 0.84752 |
 | 05 | [Rank-vs-turn arbitrage](05-rank-vs-turn-arbitrage.md) | 2 | 0.898866 |
 | 06 | [Phrase retrieval + constraint bugs](06-phrase-retrieval.md) | 2 | **0.907281** |
+| 07 | [Hybrid/dense retrieval](07-hybrid-dense-retrieval.md) | 2 | 0.906791 (flat) |

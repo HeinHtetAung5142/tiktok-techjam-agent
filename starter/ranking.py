@@ -30,6 +30,14 @@ against 0.8475 for dropping it. Both gaps are well outside the ~0.01 noise floor
 ordering signal than the two above, so mixing it in drags good candidates down. Fusion
 still earns its keep by choosing *which* candidates are considered, and still breaks
 ties, but it no longer votes on the order.
+
+A fourth signal -- dense (LSA) similarity, see dense_retrieval.py -- is blended in as a
+third additive term, DENSE_WEIGHT below. Treat this with the same suspicion as the
+removed positional blend, not less: LSA is a smoothed compression of the same term
+statistics coverage already scores, so it is correlated rather than independent, and
+"not literally the same signal as before" is not evidence that blending it is safe. It
+must be measured with a DENSE_WEIGHT=0.0 control arm before shipping a nonzero weight --
+see docs/features/07-hybrid-dense-retrieval.md for the sweep.
 """
 
 from __future__ import annotations
@@ -45,6 +53,16 @@ from starter.retrieval import CatalogIndex
 # rather than the sweep's nominal winner.
 COVERAGE_WEIGHT = 0.5
 PHRASE_WEIGHT = 0.5
+
+# Dense similarity's weight, additive on top rather than rebalanced out of the pair
+# above. Measured, not guessed: even DENSE_WEIGHT=0.03 cost MRR versus the route-only
+# control arm (0.850427 vs 0.857304), and 0.1 cost HitRate outright (0.975 -> 0.965) --
+# the same monotonic-regression signature as the removed positional blend at the top of
+# this file. LSA is correlated with _coverage (same term stats, smoothed), so this isn't
+# a surprise in hindsight, but it had to be measured rather than assumed either way.
+# Left at 0.0 deliberately: the dense signal still earns its keep as a retrieval route
+# (see DENSE_ROUTE_WEIGHT in retrieval.py), just not as a reranking term.
+DENSE_WEIGHT = 0.0
 
 # A one-token "phrase" says nothing that coverage has not already counted.
 MIN_PHRASE_TOKENS = 2
@@ -88,12 +106,25 @@ class Reranker:
         # dilute every candidate identically.
         phrase_mass = sum(sum(idf[term] for term in unit) for unit in phrase_units)
 
+        # Own try/except, separate from retrieve()'s outer one: a dense-scoring bug must
+        # cost only this term (falls back to an empty dict, i.e. 0.0 for every candidate),
+        # never the already-working coverage/phrase scoring below it.
+        dense_scores: dict[str, float] = {}
+        dense_index = getattr(self.index, "dense_index", None)
+        if dense_index is not None:
+            try:
+                dense_text = " ".join(phrases)
+                dense_scores = dense_index.similarity_scores(dense_text, candidates)
+            except Exception:
+                dense_scores = {}
+
         scored: list[tuple[float, int, str]] = []
         for rank, parent_asin in enumerate(candidates):
             factors, document = self.index.document_profile(parent_asin)
             score = (
                 COVERAGE_WEIGHT * self._coverage(idf, total_mass, factors)
                 + PHRASE_WEIGHT * self._phrase_score(idf, phrase_mass, phrase_units, document)
+                + DENSE_WEIGHT * dense_scores.get(parent_asin, 0.0)
             )
             # -rank keeps the fused order as the tie-break, so equal scores change nothing.
             # This is the only place retrieval's own ordering still has a say.

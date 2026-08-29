@@ -39,12 +39,12 @@ Metrics are also reported per scenario — always read the breakdown, not just t
 
 ### Score of record
 
-| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_phrase.json`) |
+| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_dense.json`) |
 |---|---|---|
 | HitRate@10 | 0.125 | 0.975 |
-| MRR | 0.068034 | 0.857935 |
-| MTTC | 9.81 | 2.88 |
-| **TechnicalScore** | **0.10671** | **0.907281** |
+| MRR | 0.068034 | 0.857304 |
+| MTTC | 9.81 | 2.895 |
+| **TechnicalScore** | **0.10671** | **0.906791** |
 
 Per scenario HitRate@10, current: boundary 1.0 · browsing 0.9875 · intent_override 0.9667 ·
 buying 0.9625.
@@ -52,7 +52,11 @@ buying 0.9625.
 **Every cheap term is spent.** MRR went 0.652 → 0.852 by trading turns for rank
 (`docs/features/05-rank-vs-turn-arbitrage.md`) and plateaus there; phrase retrieval plus two
 constraint-extraction bug fixes took HitRate to 0.975
-(`docs/features/06-phrase-retrieval.md`). 161 of 195 hits land at rank 1.
+(`docs/features/06-phrase-retrieval.md`). 161 of 195 hits land at rank 1. Hybrid/dense retrieval
+(`docs/features/07-hybrid-dense-retrieval.md`) shipped as a route only — TechnicalScore moved
+-0.00049, inside the noise floor — after measuring that blending it into the reranker regressed
+MRR monotonically at every nonzero weight tested. Read that doc before touching either number
+above; the plateau is real and measured, not just asserted.
 
 **The 5 remaining misses are not a retrieval problem and cannot be fixed by a better retriever.**
 Their disclosed constraints are shared with thousands of products — `public_0087` discloses only
@@ -70,7 +74,8 @@ py tools/score_delta.py <before.json> <after.json>   # markdown delta table for 
 ```
 
 **Use `py`, not `python3`.** On this Windows setup `python` and `python3` resolve to the Microsoft
-Store stub and fail; `py` is the real launcher (Python 3.12.0). The organizer README says `python3`
+Store stub and fail; `py` is the real launcher (Python 3.14.7 on this machine — verify locally,
+since the exact patch version isn't pinned). The organizer README says `python3`
 because it assumes Linux — our submission instructions must cover both.
 
 A full run takes roughly 20 seconds: the FTS5 index over all 50k products is rebuilt on `Agent()`
@@ -106,13 +111,16 @@ These are competition constraints, not style preferences. Violating them invalid
 
 ## Architecture
 
-Four modules, no third-party deps, no network:
+Five modules, no network. `numpy`/`scipy`/`scikit-learn` (pinned in `requirements.txt`) are the
+project's only third-party dependency, added for dense retrieval — see
+`docs/features/07-hybrid-dense-retrieval.md`. Everything else is still pure standard library.
 
 ```text
-starter/agent.py         orchestration + the official reset()/respond() contract
-starter/retrieval.py     FTS5 index, query routes, RRF fusion
-starter/dialog_state.py  per-session slots, evidence accumulation, question policy
-starter/ranking.py       IDF coverage + phrase reranking over the fused candidate pool
+starter/agent.py           orchestration + the official reset()/respond() contract
+starter/retrieval.py       FTS5 index, query routes, RRF fusion
+starter/dialog_state.py    per-session slots, evidence accumulation, question policy
+starter/ranking.py         IDF coverage + phrase reranking over the fused candidate pool
+starter/dense_retrieval.py offline LSA (TF-IDF + Truncated SVD) embeddings, no file I/O
 ```
 
 Keep the contract surface in `agent.py`; everything else is imported.
@@ -132,10 +140,14 @@ Keep the contract surface in `agent.py`; everything else is imported.
 - **Dual-track routing.** If any constraint has been detected the session is on the *buying* track:
   constraints become hard `AND` terms plus a price filter. Otherwise it is *browsing* — a wide,
   unfiltered `OR` query.
-- **Multi-route retrieval + fusion.** Two FTS5 queries per turn: a whole-catalog keyword route, and
-  a `categories`-column-only route (so a strong category signal isn't diluted by noisy
-  title/description scores). `_fuse_rankings` merges them with weighted **Reciprocal Rank Fusion**
-  (`weight / (60 + rank)`), keyword at `1.0` and category at `0.3`.
+- **Multi-route retrieval + fusion.** Up to four routes per turn: a whole-catalog keyword route; a
+  `categories`-column-only route (so a strong category signal isn't diluted by noisy
+  title/description scores); up to 12 IDF-weighted exact-phrase FTS5 routes for disclosures
+  specific enough to narrow the catalog (feature 06); and a dense LSA route (feature 07) for
+  semantically related items exact terms miss. `_fuse_rankings` merges them with weighted
+  **Reciprocal Rank Fusion** (`weight / (60 + rank)`) — keyword `1.0`, category `0.3`, phrase routes
+  up to `0.5` scaled by rarity, dense `0.3`. Phrase and dense routes are deliberately unfiltered by
+  hard constraints, so a wrong filter can't suppress the one route that identifies the product.
 - **Reranking.** Fusion no longer decides the final order; it generates a pool of
   `RERANK_POOL` (120) candidates and `Reranker.order` reorders them. The score is half IDF-weighted
   term coverage (discounted by which field matched) and half intact-phrase matching, on the premise
@@ -149,7 +161,7 @@ Keep the contract surface in `agent.py`; everything else is imported.
 
 | Helper | In | Does |
 |---|---|---|
-| `CatalogIndex.retrieve` | retrieval.py | the whole two-route + fusion + backfill pipeline |
+| `CatalogIndex.retrieve` | retrieval.py | the whole multi-route + fusion + backfill pipeline |
 | `CatalogIndex.run_ranked_query` | retrieval.py | one FTS5 MATCH + optional price filter + BM25 ordering |
 | `CatalogIndex.fuse_rankings` | retrieval.py | weighted RRF over any number of ranked lists |
 | `terms` / `or_expression` / `with_and_terms` | retrieval.py | tokenizing and FTS5 expression building |
@@ -164,6 +176,7 @@ Keep the contract surface in `agent.py`; everything else is imported.
 | `phrase_expression` | retrieval.py | one disclosure -> an FTS5 phrase query, or None if too short |
 | `CatalogIndex.phrase_routes` | retrieval.py | the disclosures worth their own query, IDF-weighted |
 | `disclosure_limit` | agent.py | how much of the ranked list this turn is allowed to reveal |
+| `DenseIndex.top_k` / `.similarity_scores` | dense_retrieval.py | LSA nearest-neighbours / per-candidate cosine similarity |
 
 ## How scoring actually behaves
 
@@ -234,7 +247,7 @@ Cut from the bottom up. Never let a Tier 3 idea pull someone off Tier 1 work.
 |---|---|---|
 | 0 | prerequisite | agent contract wired end-to-end; evaluator reproduces a score |
 | 1 | HitRate@10 (50%) | dual-track routing ✅ · multi-route retrieval ✅ · slot memory ✅ · clarification trigger ✅ |
-| 2 | MRR (30%) | semantic reranking ✅ · rank-vs-turn arbitrage ✅ · hybrid/dense retrieval · intent override · personalization |
+| 2 | MRR (30%) | semantic reranking ✅ · rank-vs-turn arbitrage ✅ · hybrid/dense retrieval ✅ (route only, flat) · intent override · personalization |
 | 3 | Efficiency (20%) + feasibility | latency & token logging · offline fallback · boundary handling |
 
 Four roles, split by problem-statement pillar — Retrieval & Routing, Dialog + Ranking, Integration,
