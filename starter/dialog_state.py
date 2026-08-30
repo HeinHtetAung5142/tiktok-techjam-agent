@@ -97,6 +97,22 @@ MATERIAL_EXTENDED_RE = re.compile(
     r"elastane|corduroy|chiffon)\b",
     re.IGNORECASE,
 )
+# A value a person rules out is not a value they want. "not fully polyester", "no leather"
+# and "anything but black" all match the vocabularies above, and without this the scraped
+# word lands in the slot as a *requirement* -- the agent then answers "Narrowed to items
+# matching grey, polyester" to someone who just said the opposite. The cue has to sit in
+# the same clause and within a few words of the value, so "no rush, I want black" does not
+# negate "black".
+NEGATION_CUE_RE = re.compile(
+    r"\b(?:not|no|non|without|avoid|avoiding|except|excluding|"
+    r"don'?t|doesn'?t|isn'?t|aren'?t|anything\s+but|other\s+than|instead\s+of|"
+    r"rather\s+not|nothing)\b[^.,;!?]{0,24}$",
+    re.IGNORECASE,
+)
+# Free-form only, like everything else in this block: the simulator never negates. Its
+# disclosures are generated from the target's own positive attributes
+# (evaluator/local_evaluator.py:52-71), so there is no "not X" for it to emit.
+
 # Correction scaffolding, stripped off before the reply is kept as retrieval evidence.
 # There is deliberately no "is this a correction?" test any more: a filled slot is
 # replaced by any newly stated value, cue or no cue. See `_observe_freeform`.
@@ -106,6 +122,9 @@ CORRECTION_LEAD_IN_RE = re.compile(
     re.IGNORECASE,
 )
 SLOT_LABELS = {"color": "colour", "material": "material", "price_max": "budget"}
+# Which clarifying question a filled slot already answers. Used only to stop asking a
+# person for something they have just told us -- see `_observe_freeform`.
+SLOT_ATTRIBUTES = {"color": "color", "material": "material", "price_max": "budget"}
 
 SLOTS = ("price_max", "color", "material")
 HARD_FILTER_SLOTS = ("color", "material")
@@ -158,13 +177,38 @@ def detect_constraints(message: str, extended: bool = False) -> dict[str, float 
     """
     color_re = COLOR_EXTENDED_RE if extended else COLOR_RE
     material_re = MATERIAL_EXTENDED_RE if extended else MATERIAL_RE
-    color_match = color_re.search(message)
-    material_match = material_re.search(message)
     price_match = PRICE_DOLLAR_RE.search(message) or PRICE_PHRASE_RE.search(message)
     return {
-        "color": color_match.group(1).lower() if color_match else None,
-        "material": material_match.group(1).lower() if material_match else None,
+        "color": _scan(color_re, message, extended)[0],
+        "material": _scan(material_re, message, extended)[0],
         "price_max": float(price_match.group(1)) if price_match else None,
+    }
+
+
+def _scan(pattern: re.Pattern, message: str, honor_negation: bool) -> tuple:
+    """`(the first value they want, every value they ruled out)`.
+
+    With `honor_negation` false this is exactly `pattern.search(message)` -- first match
+    wins, nothing is ever excluded -- which is what the scored path has always done.
+    """
+    wanted: str | None = None
+    avoided: list[str] = []
+    for match in pattern.finditer(message):
+        value = match.group(1).lower()
+        if honor_negation and NEGATION_CUE_RE.search(message[: match.start()]):
+            if value not in avoided:
+                avoided.append(value)
+            continue
+        if wanted is None:
+            wanted = value
+    return wanted, avoided
+
+
+def detect_exclusions(message: str) -> dict[str, list[str]]:
+    """Colours and materials the person explicitly ruled out. Free-form path only."""
+    return {
+        "color": _scan(COLOR_EXTENDED_RE, message, True)[1],
+        "material": _scan(MATERIAL_EXTENDED_RE, message, True)[1],
     }
 
 
@@ -187,6 +231,9 @@ class DialogState:
         # in utterance order. Retrieval wants a bag of terms; ranking wants the phrases.
         self.phrases: list[str] = []
         self.exhausted: set[str] = set()
+        # Values the person has ruled out ("not fully polyester"). Free-form only, so
+        # always empty while scoring -- the simulator has no way to say "not".
+        self.avoided: list[str] = []
         # Free-form bookkeeping. Written on every turn, but read only from
         # `_observe_freeform` and `message`, so it stays inert on the scored path.
         self.last_asked: str | None = None
@@ -263,6 +310,18 @@ class DialogState:
         """
         detected = detect_constraints(message, extended=True)
 
+        # What they ruled out, recorded before anything can be written into a slot -- and
+        # before the model is consulted, so an expansion cannot reintroduce the very
+        # material the person just refused.
+        for key, values in detect_exclusions(message).items():
+            for value in values:
+                if value not in self.avoided:
+                    self.avoided.append(value)
+                if self.slots[key] == value:
+                    # They are ruling out the value we were filtering on. Drop it; the
+                    # scrub further down takes it out of the evidence too.
+                    self.slots[key] = None
+
         # The regexes above own any value they can find; the model is only asked to fill
         # the gaps they left ("burgundy", "around fifty bucks"). Deferring to the regex
         # keeps the deterministic path authoritative and means a model outage degrades to
@@ -280,7 +339,7 @@ class DialogState:
 
         for key, value in detected.items():
             current = self.slots[key]
-            if value is None or value == current:
+            if value is None or value == current or value in self.avoided:
                 continue
             if current is not None:
                 # Last-write-wins, unconditionally. An earlier version required an
@@ -312,6 +371,21 @@ class DialogState:
                 self.phrases.append(keyword)
                 self.evidence.append(keyword)
 
+        # A ruled-out value must not stay in the query: `evidence_text` feeds retrieval
+        # and `phrases` feeds the reranker, so leaving "polyester" in either means we go
+        # on hunting for the thing they just refused. Idempotent, so re-running it for
+        # every avoided value on every turn is free.
+        for value in self.avoided:
+            self._scrub(value)
+
+        # Never ask for something we have already been told. Without this the agent says
+        # "Narrowed to items matching grey, polyester" and then asks "Do you have a
+        # material preference?" -- to a person, that reads as not having listened, and it
+        # burns the turn that should have asked something new.
+        for slot, attribute in SLOT_ATTRIBUTES.items():
+            if self.slots[slot] is not None:
+                self.exhausted.add(attribute)
+
         # They answered whatever we asked last turn, in their own words -- which will
         # never be "I don't have an additional preference for X". Nothing else can retire
         # the attribute, so without this we re-ask the identical question forever.
@@ -329,6 +403,20 @@ class DialogState:
         scrubbed = (" ".join(pattern.sub(" ", entry).split()) for entry in self.evidence)
         self.evidence = [entry for entry in scrubbed if entry]
         self.phrases = [phrase for phrase in self.phrases if not pattern.search(phrase)]
+
+    def _scrub(self, value: str) -> None:
+        """Take one word out of the evidence, keeping the rest of what was said.
+
+        The gentler sibling of `_supersede`, for a ruled-out value. A correction replaces
+        what a phrase was *about*, so dropping the phrase whole is right there; "grey but
+        not polyester" is one phrase making two claims, and discarding it would throw away
+        the colour they did want along with the material they didn't.
+        """
+        pattern = re.compile(rf"\b{re.escape(value)}\b", re.IGNORECASE)
+        self.evidence = [entry for entry in
+                         (" ".join(pattern.sub(" ", e).split()) for e in self.evidence) if entry]
+        self.phrases = [phrase for phrase in
+                        (" ".join(pattern.sub(" ", p).split()) for p in self.phrases) if phrase]
 
     def next_attribute(self) -> str | None:
         """The next attribute worth asking about, or None once all are spent."""
@@ -358,18 +446,32 @@ class DialogState:
         """Constraints strict enough to require as FTS5 AND terms."""
         return [str(self.slots[slot]) for slot in HARD_FILTER_SLOTS if self.slots[slot]]
 
+    def avoid_terms(self) -> list[str]:
+        """Values to keep out of the top of the list. Always empty while scoring."""
+        return list(self.avoided)
+
     def price_max(self) -> float | None:
         value = self.slots["price_max"]
         return float(value) if value is not None else None
 
     def message(self, attribute: str | None) -> str:
         """Customer-facing text: what we did, then what we still need."""
-        if self.is_buying:
+        if self.is_buying or self.avoided:
             parts = [str(self.slots[slot]) for slot in HARD_FILTER_SLOTS if self.slots[slot]]
             if self.slots["price_max"] is not None:
                 parts.append(f"under ${float(self.slots['price_max']):.2f}")
-            detail = ", ".join(parts) if parts else "your requirement"
-            said = f"Narrowed to items matching {detail}."
+            # Saying the exclusion out loud is how a person can tell "not polyester"
+            # landed as an exclusion rather than as a polyester requirement. `avoided` is
+            # empty on the scored path, so this whole branch reads as it always did.
+            avoiding = ", ".join(self.avoided)
+            if parts:
+                detail = ", ".join(parts)
+                said = (f"Narrowed to items matching {detail}, avoiding {avoiding}."
+                        if avoiding else f"Narrowed to items matching {detail}.")
+            elif avoiding:
+                said = f"Steering away from {avoiding}."
+            else:
+                said = "Narrowed to items matching your requirement."
         else:
             said = "Here are the closest matches I found."
 

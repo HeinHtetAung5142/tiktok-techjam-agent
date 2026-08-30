@@ -379,6 +379,7 @@ class CatalogIndex:
         reranker: Callable[[list[str]], list[str]] | None = None,
         phrases: list[str] | None = None,
         extra_terms: list[str] | None = None,
+        avoid_terms: list[str] | None = None,
     ) -> list[dict]:
         base_expression = or_expression(query_terms)
         if not base_expression:
@@ -467,4 +468,31 @@ class CatalogIndex:
                 # evaluator scores any raised exception as an outright miss.
                 pass
 
+        # Exclusions, applied after reranking so the reranker cannot undo them. Absent by
+        # default (`avoid_terms` is None on every scored turn -- only a person can say
+        # "not polyester"), in which case not one statement here executes.
+        if avoid_terms:
+            try:
+                merged = self.demote_terms(merged, avoid_terms)
+            except Exception:
+                pass
+
         return [{"parent_asin": parent_asin} for parent_asin in merged[:top_k]]
+
+    def demote_terms(self, ordered: list[str], avoid_terms: list[str]) -> list[str]:
+        """Push candidates whose text contains a ruled-out term to the back of the list.
+
+        Demotion, not deletion. "no polyester" is a preference, and catalog material text
+        is noisy enough ("polyester lining") that dropping outright could hide the item
+        they actually wanted -- and a short list is worse than a badly ordered one.
+        Everything still comes back, just after the products that respect the exclusion.
+        """
+        needles = [f" {term.lower()} " for term in avoid_terms if term]
+        if not needles:
+            return ordered
+        wanted, ruled_out = [], []
+        for parent_asin in ordered:
+            _, token_string = self.document_profile(parent_asin)
+            bucket = ruled_out if any(n in token_string for n in needles) else wanted
+            bucket.append(parent_asin)
+        return wanted + ruled_out

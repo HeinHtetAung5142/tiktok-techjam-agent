@@ -193,7 +193,12 @@ Keep the contract surface in `agent.py`; everything else is imported.
   *simulated* customer emits. A person typing into the WebUI matches none of them, so
   `DialogState._observe_freeform` (feature 11) handles the fall-through: it accumulates the reply as
   evidence, lets an explicit correction overwrite a slot *and* scrub the superseded value out of
-  `evidence`/`phrases`, and retires the attribute just answered so the question rotates. That branch
+  `evidence`/`phrases`, and retires the attribute just answered so the question rotates. Feature 15
+  adds the two things a person does that the simulator cannot: **negation** — "not fully polyester"
+  is recorded in `DialogState.avoided`, kept out of the slot, scrubbed from the evidence and demoted
+  in the results (`CatalogIndex.demote_terms`, after reranking) instead of becoming a polyester
+  *requirement* — and **slot-aware questioning**, retiring the attribute for any filled slot so we
+  stop asking for what we were already told. That branch
   is **unreachable while scoring** — every evaluator reply is claimed by an earlier regex — and the
   proof is that a full run with it in place is byte-identical to `results_after_fieldfactors.json`.
   Widen the correction cues or the extended colour/material vocabularies freely; they cannot move
@@ -404,7 +409,7 @@ Cut from the bottom up. Never let a Tier 3 idea pull someone off Tier 1 work.
 | 0 | prerequisite | agent contract wired end-to-end; evaluator reproduces a score |
 | 1 | HitRate@10 (50%) | dual-track routing ✅ · multi-route retrieval ✅ · slot memory ✅ · clarification trigger ✅ |
 | 2 | MRR (30%) | semantic reranking ✅ · rank-vs-turn arbitrage ✅ · hybrid/dense retrieval ✅ (route only, flat) · intent override ✅ (feature 12 — closed: slots cleared, retraction measured and rejected, 29/30 at MTTC 3.69 vs floor 3.60) · personalization ❌ (measured: profile is degenerate, no retrieval signal — see Known gaps) · **coverage precision term ⏳ (untested — the only open lever, see feature 09)** |
-| 3 | Efficiency (20%) + feasibility | latency & token logging ✅ (feature 08) · offline fallback ✅ (feature 13 — no longer vacuous: there is now an online path, and a full run with it configured *and* the network dead is byte-identical) · optional SiliconFlow Qwen3-8B ✅ (feature 13 — off by default; `expand` mode unmeasured against the live model) · boundary handling ✅ (`DECLINE_RE` vs `EXHAUSTED_RE`, `starter/dialog_state.py:56-59`) · free-form input robustness ✅ (feature 11 — WebUI/demo only, verified score-neutral byte-for-byte) |
+| 3 | Efficiency (20%) + feasibility | latency & token logging ✅ (feature 08) · offline fallback ✅ (feature 13 — no longer vacuous: there is now an online path, and a full run with it configured *and* the network dead is byte-identical) · optional SiliconFlow Qwen3-8B ✅ (feature 13 — off by default; `expand` mode unmeasured against the live model) · boundary handling ✅ (`DECLINE_RE` vs `EXHAUSTED_RE`, `starter/dialog_state.py:56-59`) · free-form input robustness ✅ (features 11 + 15 — WebUI/demo only, both verified score-neutral byte-for-byte; 15 adds negation-as-exclusion and stops re-asking a filled slot) |
 
 Four roles, split by problem-statement pillar — Retrieval & Routing, Dialog + Ranking, Integration,
 Coordination + Evaluation. **Individual assignments are still TBD.**

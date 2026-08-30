@@ -233,6 +233,8 @@ class Agent:
             reranker=lambda pool: self.reranker.order(pool, phrases),
             phrases=phrases,
             extra_terms=extra_terms,
+            # Empty on every scored turn -- only a person typing can rule a value out.
+            avoid_terms=state.avoid_terms(),
         )
 
         # Recommendations are scored every turn, so asking costs us nothing and is the

@@ -221,7 +221,42 @@ check("T2", "free-form correction scrubs the superseded value from evidence AND 
       and not any("blue" in p.lower() for p in free.phrases),
       str(free.evidence))
 check("T2", "free-form reply retires the attribute just answered (question rotates)",
-      free.exhausted == {"other"}, str(free.exhausted))
+      free.exhausted == {"other", "color"}, str(free.exhausted))
+# "color" is in there because the slot is now filled -- see the next check. Asking for a
+# value we have already been told is the bug this pins, not an over-eager retirement.
+
+known = DialogState()
+known.observe("i need a jacket", 1)
+known.next_attribute()
+known.observe("i want it in grey", 2)
+check("T2", "free-form: a filled slot retires its own question (no re-asking what we know)",
+      "color" in known.exhausted and known.next_attribute() != "color", str(known.exhausted))
+
+neg = DialogState()
+neg.observe("i need a jacket", 1)
+neg.next_attribute()
+neg.observe("i want it to be grey and not fully polyester", 2)
+check("T2", "free-form negation is an exclusion, not a requirement",
+      neg.slots["color"] == "grey" and neg.slots["material"] is None
+      and neg.avoided == ["polyester"], str(neg.slots) + " avoid=" + str(neg.avoided))
+check("T2", "a ruled-out value is scrubbed from evidence and phrases, the rest survives",
+      not any("polyester" in t.lower() for t in neg.evidence + neg.phrases)
+      and any("grey" in t.lower() for t in neg.phrases), str(neg.phrases))
+check("T2", "the exclusion is said out loud rather than silently inverted",
+      "avoiding polyester" in neg.message("style").lower(), neg.message("style"))
+check("T2", "negation is free-form only -- the scored vocabulary is untouched",
+      detect_constraints("what matters is: not applicable cotton")["material"] == "cotton"
+      and detect_constraints("no rush, I want a black leather belt",
+                             extended=True)["material"] == "leather")
+
+pool = agent.index.retrieve(retrieval.terms("polyester jacket"), [], None, 10)
+pool_ids = [row["parent_asin"] for row in pool]
+demoted = agent.index.demote_terms(pool_ids, ["polyester"])
+kept = [pid for pid in pool_ids
+        if " polyester " not in agent.index.document_profile(pid)[1]]
+check("T2", "a ruled-out value is demoted in the results, and nothing is dropped",
+      sorted(demoted) == sorted(pool_ids) and demoted[:len(kept)] == kept,
+      "%d of %d demoted" % (len(pool_ids) - len(kept), len(pool_ids)))
 
 STARTER = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "starter"
 prof_used = [m for m in ["dialog_state.py", "ranking.py", "retrieval.py", "dense_retrieval.py"]

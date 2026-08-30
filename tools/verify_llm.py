@@ -311,7 +311,10 @@ d.observe("I want a shirt", 1)
 d.next_attribute()
 d.observe("actually make it red", 2)
 check("DIALOG", "a dead model degrades to exactly the feature-11 regex behaviour",
-      d.slots["color"] == "red" and d.exhausted == {"other"}, str(d.slots["color"]))
+      # "color" retires alongside "other" because the slot is filled -- we do not ask a
+      # person for a value they have already given us.
+      d.slots["color"] == "red" and d.exhausted == {"other", "color"},
+      str(d.slots["color"]) + " " + str(d.exhausted))
 
 scripted = DialogState(llm=client_for('{"color":"pink","material":null,"price_max":null,'
                                       '"keywords":["should never appear"]}'))
