@@ -73,3 +73,6 @@ What it does not fix, what it made worse, and what should come next.
 | 08 | [Latency and token-usage disclosure](08-feasibility-disclosure.md) | 3 | 0.906791 (unchanged) |
 | 09 | [Optimization headroom](09-optimization-headroom.md) | 2 | 0.906791 (investigation, no code change) |
 | 10 | [Field-factor calibration](10-field-factor-calibration.md) | 2 | **0.912205** |
+| 11 | [Free-form input robustness](11-freeform-input-robustness.md) | 3 | 0.912205 (byte-identical) |
+| 12 | [Intent override, properly](12-intent-override.md) | 2 | 0.912205 (byte-identical) |
+| 13 | [Optional SiliconFlow LLM (Qwen3-8B)](13-siliconflow-llm.md) | 3 | 0.912205 (byte-identical; off by default) |

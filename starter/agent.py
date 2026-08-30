@@ -11,6 +11,7 @@ import statistics
 import time
 from pathlib import Path
 
+from starter import llm as llm_module
 from starter import retrieval
 from starter.dialog_state import DialogState
 from starter.ranking import Reranker
@@ -50,21 +51,43 @@ def disclosure_limit(turn: int, top_k: int, more_evidence_coming: bool) -> int:
     return min(DISCLOSURE_SCHEDULE[index], top_k)
 
 
-# Token counts we report. Both are honestly zero: this agent makes no model call of any
-# kind, so there is nothing to count -- see `latency_stats()` for the cost that *is* real.
-# Reported as literal zeros rather than omitting `usage`, so the disclosure is explicit
-# ("we used no tokens") rather than merely absent ("they didn't say").
+# Token counts we report when no model is configured -- the default, and the
+# configuration the organizer runs. Both are honestly zero: the agent makes no model call
+# of any kind, so there is nothing to count. See `latency_stats()` for the cost that *is*
+# real. Reported as literal zeros rather than omitting `usage`, so the disclosure is
+# explicit ("we used no tokens") rather than merely absent ("they didn't say"). With a
+# SiliconFlow model configured, real per-turn counts are reported instead -- see
+# `_usage_since`.
 NO_MODEL_USAGE = {"prompt_tokens": 0, "completion_tokens": 0}
 
 
 class Agent:
     """Multi-turn shopping agent: FTS5 retrieval, no LLM, no network."""
 
-    def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
+    def __init__(
+        self,
+        catalog_path: str | Path = "data/catalog.jsonl",
+        llm=None,
+        mode: str | None = None,
+    ) -> None:
         construction_started = time.perf_counter()
         self.index = CatalogIndex(catalog_path)
         self.reranker = Reranker(self.index)
         self._sessions: dict[str, DialogState] = {}
+        # Optional SiliconFlow model. Explicit arguments are for tests and for the WebUI;
+        # everything else reads the environment, where the default is "no key, no mode",
+        # i.e. off. `self.llm is None` is the judged configuration and makes every call
+        # site below a no-op -- which is what keeps the score of record byte-identical.
+        if llm is None and mode is None:
+            self.llm, self.llm_mode = llm_module.client_from_env()
+        elif llm is None:
+            # A mode without a client is still off -- there is nothing to call.
+            self.llm, self.llm_mode = None, llm_module.MODE_OFF
+        else:
+            # An injected client defaults to the score-neutral mode; `expand` must be
+            # asked for by name, never arrived at by omission.
+            self.llm = llm
+            self.llm_mode = llm_module.resolve_mode(mode or llm_module.MODE_FREEFORM)
         # Latency is a required feasibility disclosure (docs/submission_rules.md), but it
         # cannot ride along in the response: `turn_response` and `usage` both set
         # "additionalProperties": false in docs/agent_api_contract.json, so an extra
@@ -95,9 +118,27 @@ class Agent:
             "max_ms": round(samples[-1], 2),
         }
 
+    def model_stats(self) -> dict:
+        """Model-side feasibility disclosure, or an explicit "no model" record."""
+        if self.llm is None:
+            return {"enabled": False, "mode": llm_module.MODE_OFF}
+        return {"enabled": True, "mode": self.llm_mode, **self.llm.stats()}
+
+    def _usage_since(self, prompt_before: int, completion_before: int) -> dict:
+        """Honest per-turn token counts for this turn's model calls."""
+        if self.llm is None:
+            # Fresh dict per turn: the evaluator accumulates these, and handing out a
+            # shared module-level object invites a caller mutating every turn's usage.
+            return dict(NO_MODEL_USAGE)
+        return {
+            "prompt_tokens": max(0, self.llm.prompt_tokens - prompt_before),
+            "completion_tokens": max(0, self.llm.completion_tokens - completion_before),
+        }
+
     def reset(self, session_id: str, user_profile: dict) -> None:
-        # The profile is anonymized and may be used for personalization.
-        self._sessions[session_id] = DialogState()
+        # The profile is anonymized and may be used for personalization. Measured to carry
+        # no retrieval signal on this dataset -- see the demoted note in CLAUDE.md.
+        self._sessions[session_id] = DialogState(llm=self.llm)
 
     def respond(
         self,
@@ -124,6 +165,8 @@ class Agent:
         top_k: int,
     ) -> dict:
         state = self._sessions[session_id]
+        prompt_before = self.llm.prompt_tokens if self.llm is not None else 0
+        completion_before = self.llm.completion_tokens if self.llm is not None else 0
         state.observe(user_message, turn)
 
         # Query against everything revealed so far, not just this turn's message.
@@ -136,6 +179,12 @@ class Agent:
         # but not which one the customer was quoting.
         phrases = state.evidence_phrases()
 
+        # Optional route 5. `expand` mode only, so the default and `freeform` paths pass
+        # extra_terms=None and retrieval behaves exactly as it did before this existed.
+        extra_terms: list[str] | None = None
+        if self.llm is not None and self.llm_mode == llm_module.MODE_EXPAND:
+            extra_terms = llm_module.expand_query(self.llm, state.evidence_text())
+
         recommendations = self.index.retrieve(
             query_terms,
             state.and_terms() if is_buying else [],
@@ -143,6 +192,7 @@ class Agent:
             top_k,
             reranker=lambda pool: self.reranker.order(pool, phrases),
             phrases=phrases,
+            extra_terms=extra_terms,
         )
 
         # Recommendations are scored every turn, so asking costs us nothing and is the
@@ -157,7 +207,5 @@ class Agent:
             "message": state.message(ask_attribute),
             "ask_attribute": ask_attribute,
             "recommendations": recommendations,
-            # Fresh dict per turn: the evaluator accumulates these, and handing out a
-            # shared module-level object invites a caller mutating every turn's usage.
-            "usage": dict(NO_MODEL_USAGE),
+            "usage": self._usage_since(prompt_before, completion_before),
         }

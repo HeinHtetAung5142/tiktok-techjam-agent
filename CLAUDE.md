@@ -95,7 +95,15 @@ py tools/score_delta.py <before.json> <after.json>   # markdown delta table for 
 py tools/feasibility_report.py                       # latency / token / cost disclosure tables
 py tools/sweep_constants.py --list                   # show the tunable axes
 py tools/sweep_constants.py --axis A B                # coordinate-descent sweep over those axes
+py tools/verify_features.py                          # 63 feature/contract checks (exit 1 on regression)
+py tools/verify_llm.py                               # 52 LLM checks; stubs HTTP, needs no key
+py tools/llm_smoke.py                                # check a real SiliconFlow key end-to-end
 ```
+
+`verify_features.py` and `verify_llm.py` are the pre-submission gate: both exit non-zero on a
+regression, and neither needs network or credentials. Two robustness checks are reported as
+**XFAIL** rather than failures — they are known gap 4 below, a recorded decision rather than a
+regression.
 
 **Use `sweep_constants.py`, not repeated evaluator runs, to tune a constant.** It builds one
 `Agent` and reuses it across every variant, so the ~13.5 s index construction is paid once instead
@@ -116,8 +124,10 @@ disclosure (feature 05) added a few seconds back, since sessions now deliberatel
 longer to buy rank, and the phrase routes (feature 06) add a handful of extra FTS5 queries per turn.
 
 `requirements.txt` pins **`numpy`, `scipy`, `scikit-learn`** — added for the dense route in feature
-07, and the project's only third-party dependencies. Everything else is standard library, and there
-is still no network call anywhere in the agent. Anything further added must be pinned there too, or
+07, and the project's only third-party dependencies. Everything else is standard library. The agent
+makes **no network call in its default configuration**, which is the one the organizer runs; the
+optional SiliconFlow route added in feature 13 is `urllib.request` and is off unless both
+`SILICONFLOW_API_KEY` and `SHOPPING_COPILOT_LLM` are set. Anything further added must be pinned there too, or
 the organizer cannot reproduce the run: `pip install -r requirements.txt` is a required step in our
 setup instructions, not an optional one.
 
@@ -146,9 +156,10 @@ These are competition constraints, not style preferences. Violating them invalid
 
 ## Architecture
 
-Five modules, no network. `numpy`/`scipy`/`scikit-learn` (pinned in `requirements.txt`) are the
-project's only third-party dependency, added for dense retrieval — see
-`docs/features/07-hybrid-dense-retrieval.md`. Everything else is still pure standard library.
+Six modules, and no network in the default configuration. `numpy`/`scipy`/`scikit-learn` (pinned in
+`requirements.txt`) are the project's only third-party dependency, added for dense retrieval — see
+`docs/features/07-hybrid-dense-retrieval.md`. Everything else is still pure standard library,
+`starter/llm.py` included.
 
 ```text
 starter/agent.py           orchestration + the official reset()/respond() contract
@@ -156,6 +167,7 @@ starter/retrieval.py       FTS5 index, query routes, RRF fusion
 starter/dialog_state.py    per-session slots, evidence accumulation, question policy
 starter/ranking.py         IDF coverage + phrase reranking over the fused candidate pool
 starter/dense_retrieval.py offline LSA (TF-IDF + Truncated SVD) embeddings, no file I/O
+starter/llm.py             OPTIONAL SiliconFlow Qwen3-8B client; off by default, stdlib-only
 ```
 
 Keep the contract surface in `agent.py`; everything else is imported.
@@ -389,18 +401,39 @@ Cut from the bottom up. Never let a Tier 3 idea pull someone off Tier 1 work.
 | 0 | prerequisite | agent contract wired end-to-end; evaluator reproduces a score |
 | 1 | HitRate@10 (50%) | dual-track routing ✅ · multi-route retrieval ✅ · slot memory ✅ · clarification trigger ✅ |
 | 2 | MRR (30%) | semantic reranking ✅ · rank-vs-turn arbitrage ✅ · hybrid/dense retrieval ✅ (route only, flat) · intent override ✅ (feature 12 — closed: slots cleared, retraction measured and rejected, 29/30 at MTTC 3.69 vs floor 3.60) · personalization ❌ (measured: profile is degenerate, no retrieval signal — see Known gaps) · **coverage precision term ⏳ (untested — the only open lever, see feature 09)** |
-| 3 | Efficiency (20%) + feasibility | latency & token logging ✅ (feature 08) · offline fallback ✅ (vacuous — there is no online path to fall back from) · boundary handling ✅ (`DECLINE_RE` vs `EXHAUSTED_RE`, `starter/dialog_state.py:56-59`) · free-form input robustness ✅ (feature 11 — WebUI/demo only, verified score-neutral byte-for-byte) |
+| 3 | Efficiency (20%) + feasibility | latency & token logging ✅ (feature 08) · offline fallback ✅ (feature 13 — no longer vacuous: there is now an online path, and a full run with it configured *and* the network dead is byte-identical) · optional SiliconFlow Qwen3-8B ✅ (feature 13 — off by default; `expand` mode unmeasured against the live model) · boundary handling ✅ (`DECLINE_RE` vs `EXHAUSTED_RE`, `starter/dialog_state.py:56-59`) · free-form input robustness ✅ (feature 11 — WebUI/demo only, verified score-neutral byte-for-byte) |
 
 Four roles, split by problem-statement pillar — Retrieval & Routing, Dialog + Ranking, Integration,
 Coordination + Evaluation. **Individual assignments are still TBD.**
 
 ### Model policy
 
-Local and offline **for now** — no LLM calls, no API keys, no provider chosen. A hosted model may be
-added later for query rewriting, clarification, or reranking, but only behind a fallback that still
-runs with network access disabled, since official judging may cut the network. Whatever we choose
-gets disclosed in the final report: model, approximate cost, token usage, latency, fallback
-behavior.
+**Provider chosen: SiliconFlow, model `Qwen/Qwen3-8B` (permanently free), and it is OFF by
+default** — see `docs/features/13-siliconflow-llm.md`. The default configuration is the judged one
+and makes no model call at all; a full run with the model code in place is **byte-identical** to
+`results_after_fieldfactors.json`, sessions array included.
+
+Enabling requires **both** `SILICONFLOW_API_KEY` and `SHOPPING_COPILOT_LLM`; neither alone does
+anything, and an unrecognized mode fails closed to `off`. Modes:
+
+| Mode | Reach | Score risk |
+|---|---|---|
+| `off` (default) | nothing runs | none — byte-identical |
+| `freeform` | only `DialogState._observe_freeform`, unreachable while scoring | none by construction |
+| `expand` | adds retrieval route 5 at weight 0.25 | real but tiny; **unmeasured against the live model** |
+
+Everything fails soft: timeout, HTTP error, bad JSON, or no network returns `None` and the agent
+falls through to the pipeline that scores 0.912205 on its own. Verified, not asserted — a full
+200-session run with `expand` configured *and every socket raising* is byte-identical too.
+
+Two cautions before anyone enables `expand` for real. **It has only ever been measured against
+stubs** (no key exists on the team yet); the worst stub cost 0.00013 with HitRate untouched, but a
+stub is not a model. And **`expand` breaks reproducibility**: greedy decoding is the closest this
+endpoint offers, so "a changed score means a changed agent" — and the control-arm guard in
+`sweep_constants.py` — hold only in `off` and `freeform`.
+
+Disclosed in the final report either way: model, cost (free tier), token usage (`usage` now reports
+real counts when enabled, honest zeros when not), latency, and fallback behavior.
 
 ## Workflow
 

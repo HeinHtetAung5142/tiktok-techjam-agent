@@ -176,7 +176,11 @@ def slot_display(slot: str, value: float | str) -> str:
 class DialogState:
     """Everything we have learned in one session."""
 
-    def __init__(self) -> None:
+    def __init__(self, llm=None) -> None:
+        # An optional SiliconFlowClient. Consulted *only* from `_observe_freeform`, which
+        # the simulated customer cannot reach, so it cannot touch a scored turn. None
+        # unless the operator configured a key and a mode -- see starter/llm.py.
+        self.llm = llm
         self.slots: dict[str, float | str | None] = {slot: None for slot in SLOTS}
         self.evidence: list[str] = []
         # The same disclosures as `evidence`, but broken into individual claims and kept
@@ -194,8 +198,10 @@ class DialogState:
 
         detected = detect_constraints(message)
         for key, value in detected.items():
-            # First-write-wins. This is why intent override is still unhandled: a later
-            # contradicting value lands in an already-filled slot and is dropped.
+            # First-write-wins: a later contradicting value lands in an already-filled
+            # slot and is dropped. Measured benign -- it fires in 3 of 200 sessions and
+            # retains the correct value in all three (see CLAUDE.md). An *explicit*
+            # override is handled separately below, by clearing every slot.
             if value is not None and self.slots[key] is None:
                 self.slots[key] = value
 
@@ -255,7 +261,24 @@ class DialogState:
         retire an attribute), the same prefix (slots are first-write-wins) and the same
         ranking (no evidence accumulates), turn after turn.
         """
-        for key, value in detect_constraints(message, extended=True).items():
+        detected = detect_constraints(message, extended=True)
+
+        # The regexes above own any value they can find; the model is only asked to fill
+        # the gaps they left ("burgundy", "around fifty bucks"). Deferring to the regex
+        # keeps the deterministic path authoritative and means a model outage degrades to
+        # exactly the feature-11 behaviour rather than to nothing.
+        keywords: list[str] = []
+        if self.llm is not None:
+            from starter import llm as llm_module
+
+            parsed = llm_module.parse_freeform(self.llm, message)
+            if parsed:
+                for key in SLOTS:
+                    if detected.get(key) is None and parsed.get(key) is not None:
+                        detected[key] = parsed[key]
+                keywords = parsed.get("keywords") or []
+
+        for key, value in detected.items():
             current = self.slots[key]
             if value is None or value == current:
                 continue
@@ -280,6 +303,14 @@ class DialogState:
         if text:
             self.evidence.append(text)
             self.phrases.extend(phrase_units(text))
+
+        # Model-proposed phrasings for the same request ("water resistant" for "won't die
+        # in the rain"). Kept as phrases so the reranker can match them intact, and only
+        # ones the person's own words did not already contain.
+        for keyword in keywords:
+            if keyword not in self.phrases and keyword.lower() not in message.lower():
+                self.phrases.append(keyword)
+                self.evidence.append(keyword)
 
         # They answered whatever we asked last turn, in their own words -- which will
         # never be "I don't have an additional preference for X". Nothing else can retire

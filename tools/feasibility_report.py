@@ -60,19 +60,43 @@ def main() -> None:
     ):
         print(f"| `respond()` -- {label} | **{latency[key]:.1f} ms** |")
 
+    model = agent.model_stats()
+
     print("\n### Token usage and cost\n")
     print("| Item | Value |")
     print("|---|---|")
-    print("| LLM / external API | **None** -- no model call of any kind |")
-    print("| Network access required | **None** -- runs fully offline |")
-    print("| API keys / environment variables | **None** |")
-    print("| Estimated model cost | **$0.00** |")
-    print(
-        f"| Reported token usage | `{usage['prompt_tokens']}` prompt, "
-        f"`{usage['completion_tokens']}` completion -- honestly zero, not unreported |"
-    )
+    if not model["enabled"]:
+        print("| LLM / external API | **None** -- no model call of any kind |")
+        print("| Network access required | **None** -- runs fully offline |")
+        print("| API keys / environment variables | **None** |")
+        print("| Estimated model cost | **$0.00** |")
+        print(
+            f"| Reported token usage | `{usage['prompt_tokens']}` prompt, "
+            f"`{usage['completion_tokens']}` completion -- honestly zero, not unreported |"
+        )
+    else:
+        # A model was configured for this run (feature 13). Disclose what actually ran
+        # rather than the default "$0.00, no network" claim, which would now be false.
+        print(f"| LLM / external API | **{model['model']}** via {model['base_url']} |")
+        print(f"| Mode | `{model['mode']}` (default is `off`) |")
+        print(
+            f"| Network access required | **Yes while enabled** -- {model['calls']} calls, "
+            f"{model['failures']} failed; every failure falls back to the offline pipeline |"
+        )
+        print(f"| API keys / environment variables | `SILICONFLOW_API_KEY`, `SHOPPING_COPILOT_LLM` |")
+        print("| Estimated model cost | **$0.00** -- SiliconFlow permanently-free tier |")
+        print(
+            f"| Reported token usage | `{usage['prompt_tokens']}` prompt, "
+            f"`{usage['completion_tokens']}` completion -- measured, not estimated |"
+        )
+        print(f"| Model call latency | **{model['mean_ms']:.1f} ms** mean |")
 
-    if usage["total_tokens"] != 0:
+    if model["enabled"]:
+        print(
+            "\n> Measured with a model enabled. The submitted default is `off`, which "
+            "makes no call and reports zero tokens."
+        )
+    elif usage["total_tokens"] != 0:
         # A nonzero count here means someone wired in a model without updating the
         # disclosure. Fail loudly rather than shipping a stale "$0.00" claim.
         raise SystemExit(

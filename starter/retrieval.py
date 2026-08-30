@@ -50,6 +50,15 @@ PHRASE_DF_MAX = 2000
 PHRASE_ROUTE_WEIGHT = 0.5
 MAX_PHRASE_ROUTES = 12
 
+# Expansion route (optional, off unless a SiliconFlow model is configured in `expand`
+# mode -- see starter/llm.py). Model-proposed keywords are the least trustworthy signal
+# in the system: they are the only route whose query text nothing in the catalog or the
+# conversation vouches for. So it is weighted *below* the category route, and like the
+# phrase and dense routes it can only ever add candidates -- it never filters, and the
+# reranker still decides the final order. With no extra terms supplied, no query is
+# issued and no route is appended, which is what makes the default path byte-identical.
+EXPANSION_ROUTE_WEIGHT = 0.25
+
 
 # How many fused candidates a reranker gets to reorder. Bigger pools give the reranker
 # more chances to rescue a buried target, but every extra candidate is also a chance to
@@ -369,6 +378,7 @@ class CatalogIndex:
         top_k: int,
         reranker: Callable[[list[str]], list[str]] | None = None,
         phrases: list[str] | None = None,
+        extra_terms: list[str] | None = None,
     ) -> list[dict]:
         base_expression = or_expression(query_terms)
         if not base_expression:
@@ -418,6 +428,23 @@ class CatalogIndex:
                 dense_ids = []
             if dense_ids:
                 routes.append((dense_ids, DENSE_ROUTE_WEIGHT))
+
+        # Route 5: expansion route -- keywords proposed by an optional language model.
+        # Absent by default (`extra_terms` is None), in which case not one statement in
+        # this block executes and `routes` is exactly what it was before this route
+        # existed. Unfiltered for the same reason as routes 3 and 4, and wrapped in its
+        # own try/except so a malformed expansion term costs only this route.
+        if extra_terms:
+            try:
+                expansion_expression = or_expression(
+                    [term for term in extra_terms if term not in set(query_terms)]
+                )
+                if expansion_expression:
+                    expansion_ids = self.run_ranked_query(expansion_expression, None, limit)
+                    if expansion_ids:
+                        routes.append((expansion_ids, EXPANSION_ROUTE_WEIGHT))
+            except sqlite3.Error:
+                pass
 
         merged = self.fuse_rankings(routes, pool_k)
 
