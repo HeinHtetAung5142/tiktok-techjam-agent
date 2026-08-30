@@ -68,7 +68,11 @@ def main() -> None:
     if not model["enabled"]:
         print("| LLM / external API | **None** -- no model call of any kind |")
         print("| Network access required | **None** -- runs fully offline |")
-        print("| API keys / environment variables | **None** |")
+        print(
+            "| API keys / environment variables | **None required.** "
+            "`SHOPPING_COPILOT_API_KEY` + `SHOPPING_COPILOT_LLM` enable the optional "
+            "route; unset here |"
+        )
         print("| Estimated model cost | **$0.00** |")
         print(
             f"| Reported token usage | `{usage['prompt_tokens']}` prompt, "
@@ -83,8 +87,9 @@ def main() -> None:
             f"| Network access required | **Yes while enabled** -- {model['calls']} calls, "
             f"{model['failures']} failed; every failure falls back to the offline pipeline |"
         )
-        print(f"| API keys / environment variables | `SILICONFLOW_API_KEY`, `SHOPPING_COPILOT_LLM` |")
-        print("| Estimated model cost | **$0.00** -- SiliconFlow permanently-free tier |")
+        print("| API keys / environment variables | `SHOPPING_COPILOT_API_KEY`, "
+              "`SHOPPING_COPILOT_LLM` |")
+        print("| Estimated model cost | **$0.00** -- a free model tier (rate-limited, not billed) |")
         print(
             f"| Reported token usage | `{usage['prompt_tokens']}` prompt, "
             f"`{usage['completion_tokens']}` completion -- measured, not estimated |"

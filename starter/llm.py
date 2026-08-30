@@ -1,4 +1,11 @@
-"""Optional SiliconFlow (OpenAI-compatible) language model, off by default.
+"""Optional OpenAI-compatible language model, off by default.
+
+Provider-agnostic by construction: this is plain chat completions -- `POST
+{base_url}/chat/completions`, `Bearer` auth, `messages`/`temperature`/`max_tokens` -- so
+OpenRouter (the default), SiliconFlow, Groq, Together or a local Ollama all work with no
+code change. The `SILICONFLOW_*` variable names and the `SiliconFlowClient` class name are
+historical: feature 13 targeted SiliconFlow before its free tier turned out to require
+mainland-Chinese real-name verification. Setup recipes: docs/LLM_SETUP.md.
 
 Why this module is shaped so defensively
 ----------------------------------------
@@ -17,10 +24,12 @@ Three hard constraints from CLAUDE.md decide the whole design:
 
 Configuration is environment-only -- no key ever lands in the repo (a hard rule).
 
-    SILICONFLOW_API_KEY   required for any model use at all. Unset -> disabled.
-    SHOPPING_COPILOT_LLM  off (default) | freeform | expand
-    SILICONFLOW_MODEL     override the model id (default Qwen/Qwen3-8B)
-    SILICONFLOW_BASE_URL  override the endpoint (default https://api.siliconflow.cn/v1)
+    SHOPPING_COPILOT_LLM       off (default) | freeform | expand
+    SHOPPING_COPILOT_API_KEY   required for any model use at all. Unset -> disabled.
+    SHOPPING_COPILOT_MODEL     model id (default inclusionai/ling-3.0-flash-fin:free)
+    SHOPPING_COPILOT_BASE_URL  endpoint (default https://openrouter.ai/api/v1)
+
+The `SILICONFLOW_*` names feature 13 shipped with still work as aliases; see `LEGACY_ENV`.
 
 Modes, in increasing order of how much they can affect a scored run:
 
@@ -32,8 +41,9 @@ Modes, in increasing order of how much they can affect a scored run:
   why feature 11 came back byte-identical. So this mode is score-neutral *by
   construction*, not by measurement.
 - **expand** -- additionally lets the model propose extra retrieval keywords, fused as
-  one more low-weight RRF route. This one *can* move the score and has **not** been
-  measured against the real endpoint, so it is opt-in and documented as experimental.
+  one more low-weight RRF route. This one *can* move the score. Its probes have been
+  measured against a live endpoint, but a full 200-session run in this mode never has
+  (the free-tier quota does not stretch to it), so it is opt-in and experimental.
 
 Standard library only. `urllib.request` keeps `requirements.txt` untouched, so the
 organizer's `pip install -r requirements.txt` still reproduces the run exactly.
@@ -44,25 +54,81 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import time
 import urllib.error
 import urllib.request
 from typing import Callable
 
 
-DEFAULT_BASE_URL = "https://api.siliconflow.cn/v1"
+# OpenRouter, because it is the free endpoint a teammate can actually sign up for: no
+# identity check, and free model slugs. SiliconFlow (the original default, feature 13) is
+# still one `SHOPPING_COPILOT_BASE_URL` away, but its free tier requires mainland-Chinese
+# real-name verification, which is why no key was ever obtained against it.
+DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Qwen/Qwen3-8B is SiliconFlow's strongest permanently-free chat model: 128K context,
-# instruction-tuned, reliable at terse JSON, and it accepts `enable_thinking: false` so we
-# are not billed latency for a reasoning trace we would throw away. The other free chat
-# model, deepseek-ai/DeepSeek-R1-Distill-Qwen-7B, is a reasoning distill that emits long
-# <think> blocks -- strictly worse for the short structured extraction we want per turn.
-DEFAULT_MODEL = "Qwen/Qwen3-8B"
+# Chosen by measurement, not by reading model cards: `py tools/benchmark_llms.py` against
+# every free slug that would answer, twice. It is the only one that scored 100% on all four
+# probes (JSON parse rate, slot accuracy, price accuracy, expansion-term recall) at ~1.5s
+# mean -- comfortably inside the 4.5s BREAKER_SLOW_MS threshold -- and it reproduced those
+# numbers exactly on a second run. What the field looked like:
+#
+#   inclusionai/ling-3.0-flash-fin  100/100/100/100  ~1.5s   <- this one
+#   nvidia/nemotron-3-super-120b     80/100/100/50   4-11s   leaks reasoning prose into
+#                                                            `content`; latency unstable
+#   google/gemma-4-26b-a4b-it        rate-limited upstream (shared Google AI Studio pool)
+#   nvidia/nemotron-3.5-lightning     0/0/0/0        ~8.7s   tripped the breaker outright
+#   liquid/lfm-2.5-2.6b, minimax-m2.7 20/0/0/0              cannot hold the JSON contract
+#
+# Caveat worth knowing: the `-fin` suffix is a finance-tuned variant. That looks wrong for a
+# clothing catalog, and it is the first thing to re-measure if quality ever looks off -- but
+# it beat every general-purpose free slug on our own probes, twice, and the probes are the
+# job. `openrouter/free` was rejected outright regardless of score: it picks a free model at
+# random per call, so the feasibility disclosure could not name a model.
+#
+# Two live constraints worth knowing before trusting any of the above:
+#
+#   - **OpenRouter's free tier is 50 requests per DAY** on a keyless-credit account, shared
+#     across every model. The benchmark above spends ~5 per model per run, and exhausting
+#     it returns 429 on everything -- which looks exactly like a broken key if you are not
+#     expecting it. `X-RateLimit-Remaining` in the 429 body tells you.
+#   - The free pools are also rate-limited *upstream*, per model and independently of your
+#     quota, which is what took both Google slugs out during the measurement above.
+#
+# So a failing default is more likely to be quota than a bad id. Free slugs do also come
+# and go: if this one starts 404ing, run the benchmark again and pick the winner -- see
+# docs/LLM_SETUP.md. Nothing depends on this exact value; it is only what you get when you
+# set a key and nothing else.
+DEFAULT_MODEL = "inclusionai/ling-3.0-flash-fin:free"
 
-API_KEY_ENV = "SILICONFLOW_API_KEY"
+# Provider-neutral, and all one family with the mode variable that was always called this.
+# The client is plain OpenAI-compatible chat completions, so naming these after one vendor
+# was wrong the moment the default moved off it.
 MODE_ENV = "SHOPPING_COPILOT_LLM"
-MODEL_ENV = "SILICONFLOW_MODEL"
-BASE_URL_ENV = "SILICONFLOW_BASE_URL"
+API_KEY_ENV = "SHOPPING_COPILOT_API_KEY"
+MODEL_ENV = "SHOPPING_COPILOT_MODEL"
+BASE_URL_ENV = "SHOPPING_COPILOT_BASE_URL"
+
+# The names feature 13 shipped with. Still honoured, so a teammate's existing shell or
+# `.env` keeps working -- but the canonical name above wins when both are set, and
+# `starter/env_file.py` rewrites the old ones on its next write. Deliberately silent: this
+# is read during `Agent()` construction, which is on the scored path, and a deprecation
+# warning printed there would land in the middle of an evaluator run.
+LEGACY_ENV = {
+    API_KEY_ENV: "SILICONFLOW_API_KEY",
+    MODEL_ENV: "SILICONFLOW_MODEL",
+    BASE_URL_ENV: "SILICONFLOW_BASE_URL",
+}
+
+
+def env_value(name: str) -> str:
+    """The canonical variable, falling back to its legacy alias. `""` if neither is set."""
+    value = (os.environ.get(name) or "").strip()
+    if value:
+        return value
+    legacy = LEGACY_ENV.get(name)
+    return (os.environ.get(legacy) or "").strip() if legacy else ""
+
 
 MODE_OFF = "off"
 MODE_FREEFORM = "freeform"
@@ -83,6 +149,36 @@ MAX_OUTPUT_TOKENS = 256
 # adversarial completion cannot flood the query.
 MAX_EXPANSION_TERMS = 8
 
+# --- Circuit breaker -----------------------------------------------------------------
+#
+# Per-call fail-soft is not enough on its own. With the network down, every turn still
+# pays the full TIMEOUT_SECONDS before falling through -- ten turns of a dead endpoint is
+# a minute of dead air for an outcome we already know. So repeated failure *latches the
+# client off* for the rest of the process: `complete()` then returns None immediately,
+# with no socket and no wait, and the agent runs on the offline pipeline that scores
+# 0.912205 by itself.
+#
+# Three ways to trip it, because "unusable" has three shapes:
+BREAKER_FAILURES = 3          # consecutive failures of any kind (HTTP 500s, bad JSON)
+BREAKER_NETWORK_FAILURES = 2  # consecutive *connection* failures -- no route, DNS dead
+BREAKER_SLOW_CALLS = 3        # consecutive successes that were too slow to be worth it
+BREAKER_SLOW_MS = 4500.0      # what "too slow" means, against a 6000 ms timeout
+
+# Connection-level failures: the network is unreachable, rather than the service being
+# unhappy. Tripped on sooner because retrying is hopeless, not merely unlucky.
+_NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError, socket.gaierror,
+                   socket.timeout)
+# `HTTPError` subclasses `URLError`, but it means we *reached* the service and it answered.
+# That is a service problem, not an outage, so it takes the slower failure path.
+_REACHED_SERVICE_ERRORS = (urllib.error.HTTPError,)
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """True when the failure looks like "there is no network", not "the service said no"."""
+    if isinstance(exc, _REACHED_SERVICE_ERRORS):
+        return False
+    return isinstance(exc, _NETWORK_ERRORS)
+
 _TERM_RE = re.compile(r"^[a-z0-9][a-z0-9 \-]{1,28}$")
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
@@ -92,11 +188,44 @@ _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
+def _provider_message(raw: bytes) -> str:
+    """The provider's own error text, or a trimmed body. Never raises, never leaks a key.
+
+    Providers nest this differently -- OpenRouter puts the useful sentence in
+    `error.metadata.raw` for upstream failures and `error.message` for its own, so both are
+    checked before falling back to the raw body.
+    """
+    try:
+        document = json.loads(raw.decode("utf-8", "replace"))
+    except (ValueError, AttributeError):
+        return raw.decode("utf-8", "replace")[:200].strip() if raw else "no response body"
+    error = document.get("error") if isinstance(document, dict) else None
+    if isinstance(error, dict):
+        metadata = error.get("metadata")
+        if isinstance(metadata, dict) and isinstance(metadata.get("raw"), str):
+            return metadata["raw"][:200].strip()
+        if isinstance(error.get("message"), str):
+            return error["message"][:200].strip()
+    if isinstance(error, str):
+        return error[:200].strip()
+    return json.dumps(document)[:200]
+
+
 def urllib_transport(url: str, headers: dict, body: bytes, timeout: float) -> tuple[int, bytes]:
     """The real HTTP call. Swapped for a stub in tests so they need no key and no network."""
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return int(response.status), response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return int(response.status), response.read()
+    except urllib.error.HTTPError as error:
+        # `urlopen` raises on any non-2xx, which threw away the response body -- and the
+        # body is where the provider explains itself ("Rate limit exceeded:
+        # free-models-per-day"). Without this the operator saw only urllib's generic
+        # "HTTP Error 429: Too Many Requests" and could not tell a quota from a bad key.
+        # Returned rather than re-raised so it takes the same path as a stubbed non-200:
+        # `complete()` builds the message and the breaker still classifies it as a service
+        # failure (we reached the service), not a network outage.
+        return int(error.code), error.read()
 
 
 class SiliconFlowClient:
@@ -128,12 +257,81 @@ class SiliconFlowClient:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.latencies_ms: list[float] = []
+        # Circuit breaker. `disabled` latches True and every later call short-circuits to
+        # None without touching the network -- see the BREAKER_* constants above.
+        self.disabled = False
+        self.disabled_reason: str | None = None
+        # Why the most recent call failed, for the operator. None until something does.
+        self.last_error: str | None = None
+        self.skipped = 0
+        self._failure_streak = 0
+        self._network_streak = 0
+        self._slow_streak = 0
+
+    # -- circuit breaker ---------------------------------------------------------
+
+    def trip(self, reason: str) -> None:
+        """Latch the client off for the rest of the process. Idempotent."""
+        if not self.disabled:
+            self.disabled = True
+            self.disabled_reason = reason
+
+    def reenable(self) -> None:
+        """Close the breaker again and forget the streaks.
+
+        For the WebUI's "retry" affordance: the operator plugged the network back in and
+        wants another go without restarting a 15-second index build. Nothing calls this
+        automatically -- an automatic half-open retry would put the timeout back on the
+        turn we tripped the breaker to protect.
+        """
+        self.disabled = False
+        self.disabled_reason = None
+        self.last_error = None
+        self._failure_streak = 0
+        self._network_streak = 0
+        self._slow_streak = 0
+
+    def _note_success(self, elapsed_ms: float) -> None:
+        self.last_error = None
+        self._failure_streak = 0
+        self._network_streak = 0
+        if elapsed_ms > BREAKER_SLOW_MS:
+            self._slow_streak += 1
+            if self._slow_streak >= BREAKER_SLOW_CALLS:
+                self.trip(
+                    "%d consecutive calls slower than %.0f ms"
+                    % (self._slow_streak, BREAKER_SLOW_MS)
+                )
+        else:
+            self._slow_streak = 0
+
+    def _note_failure(self, exc: BaseException) -> None:
+        self._failure_streak += 1
+        self._slow_streak = 0
+        if _is_network_error(exc):
+            self._network_streak += 1
+            if self._network_streak >= BREAKER_NETWORK_FAILURES:
+                self.trip(
+                    "%d consecutive connection failures (%s) -- treating the network as down"
+                    % (self._network_streak, type(exc).__name__)
+                )
+                return
+        else:
+            self._network_streak = 0
+        if self._failure_streak >= BREAKER_FAILURES:
+            self.trip("%d consecutive failed calls" % self._failure_streak)
 
     def complete(self, system: str, user: str, max_tokens: int = MAX_OUTPUT_TOKENS) -> str | None:
         """One chat completion, or None on any failure whatsoever."""
         key = (system, user, max_tokens)
         if key in self._cache:
             return self._cache[key]
+
+        # Breaker open: answer immediately with the same None a failure would produce, so
+        # every caller's existing fallback handles it and no turn waits on a dead socket.
+        if self.disabled:
+            self.skipped += 1
+            return None
 
         payload = {
             "model": self.model,
@@ -144,15 +342,33 @@ class SiliconFlowClient:
             "max_tokens": max_tokens,
             # Greedy decoding: the closest this endpoint gets to reproducible. Server-side
             # batching still means it is not *guaranteed* deterministic -- see the caveat
-            # in docs/features/13-siliconflow-llm.md.
+            # in docs/features/13-optional-llm.md.
             "temperature": 0.0,
             "top_p": 1.0,
             "stream": False,
         }
-        if "qwen3" in self.model.lower():
-            # SiliconFlow's Qwen3 switch for hybrid reasoning. Sent only for Qwen3, since
-            # an endpoint that does not know the field may reject the whole request.
+        if "qwen3" in self.model.lower() and "siliconflow" in self.base_url.lower():
+            # SiliconFlow's Qwen3 switch for hybrid reasoning. Gated on BOTH halves,
+            # because an endpoint that does not know the field may reject the whole
+            # request. The model half alone is not enough: the same weights are served
+            # under ids that match "qwen3" elsewhere (OpenRouter's `qwen/qwen3-8b:free`,
+            # Ollama's `qwen3:8b`), and this field is SiliconFlow's, not OpenAI's. Any
+            # OpenAI-compatible endpoint works here -- see docs/LLM_SETUP.md.
             payload["enable_thinking"] = False
+        # No OpenRouter equivalent is sent, and that is a measured decision rather than an
+        # oversight. Most free slugs there are reasoning models that return the trace in a
+        # separate `reasoning` field and, when they ramble, spend the whole `max_tokens`
+        # budget on it and hand back `content: null` with finish_reason "length". Three
+        # candidate switches were tried against the live endpoint:
+        #   reasoning={"enabled": False}  -> nulled content outright. Worse.
+        #   reasoning={"exclude": True}   -> hides the trace but still generates it, so it
+        #                                    does not free the budget. No measured benefit.
+        #   reasoning={"effort": "low"}   -> the run was contaminated by a rate limit
+        #                                    (see below); no trustworthy reading.
+        # Baseline with no reasoning field scored best of the lot (5/6 usable replies at
+        # max_tokens=256) before the daily free quota ran out, so plain OpenAI it stays.
+        # `complete()` already treats a null content as a failed call and the agent falls
+        # through to offline retrieval, which is the behaviour we actually rely on.
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -166,7 +382,11 @@ class SiliconFlowClient:
                 f"{self.base_url}/chat/completions", headers, body, self.timeout
             )
             if status != 200:
-                raise OSError(f"HTTP {status}")
+                # Carry the provider's own words up with the status. Without this a 429
+                # ("you are out of free requests until 08:00") and a 401 ("your key is
+                # wrong") both surfaced to the operator as the identical, useless "the
+                # call failed" -- which is the hardest possible version of this to debug.
+                raise OSError("HTTP %d: %s" % (status, _provider_message(raw)))
             document = json.loads(raw.decode("utf-8"))
             content = document["choices"][0]["message"]["content"]
             if not isinstance(content, str):
@@ -182,10 +402,17 @@ class SiliconFlowClient:
                     setattr(self, attribute, getattr(self, attribute) + value)
             text = _THINK_RE.sub("", content).strip()
             self._cache[key] = text
+            self._note_success((time.perf_counter() - started) * 1000.0)
             return text
-        except Exception:  # noqa: BLE001 - a model failure must never fail the turn
+        except Exception as exc:  # noqa: BLE001 - a model failure must never fail the turn
             self.failures += 1
             self._cache[key] = None
+            # Kept so the WebUI and llm_smoke can say WHY, not just "it failed". Never
+            # includes the key: only the status line and the provider's message.
+            self.last_error = "%s: %s" % (type(exc).__name__, exc) if not isinstance(
+                exc, OSError
+            ) else str(exc)
+            self._note_failure(exc)
             return None
         finally:
             self.latencies_ms.append((time.perf_counter() - started) * 1000.0)
@@ -197,6 +424,10 @@ class SiliconFlowClient:
             "base_url": self.base_url,
             "calls": self.calls,
             "failures": self.failures,
+            "skipped": self.skipped,
+            "disabled": self.disabled,
+            "disabled_reason": self.disabled_reason,
+            "last_error": self.last_error,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "mean_ms": round(sum(self.latencies_ms) / len(self.latencies_ms), 2)
@@ -222,15 +453,18 @@ def client_from_env(
 
     Both an API key *and* an explicit mode are required. Neither alone turns the model
     on, so a stray key in a teammate's shell cannot silently change a scored run.
+
+    Every variable is read through `env_value`, so the legacy `SILICONFLOW_*` names still
+    work and the canonical `SHOPPING_COPILOT_*` ones win when both are set.
     """
     mode = resolve_mode(os.environ.get(MODE_ENV))
-    api_key = (os.environ.get(API_KEY_ENV) or "").strip()
+    api_key = env_value(API_KEY_ENV)
     if mode == MODE_OFF or not api_key:
         return None, MODE_OFF
     client = SiliconFlowClient(
         api_key=api_key,
-        model=(os.environ.get(MODEL_ENV) or DEFAULT_MODEL).strip(),
-        base_url=(os.environ.get(BASE_URL_ENV) or DEFAULT_BASE_URL).strip(),
+        model=env_value(MODEL_ENV) or DEFAULT_MODEL,
+        base_url=env_value(BASE_URL_ENV) or DEFAULT_BASE_URL,
         transport=transport,
     )
     return client, mode

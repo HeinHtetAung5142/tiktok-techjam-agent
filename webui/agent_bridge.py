@@ -22,6 +22,8 @@ import threading
 import time
 import uuid
 
+from starter import env_file
+from starter import llm
 from starter import retrieval
 from starter.agent import MAX_QUERY_TERMS, Agent
 
@@ -50,6 +52,43 @@ STUB_PROFILE = {
     "preference_tags": [],
     "summary": "Live web session; no prior history.",
 }
+
+
+def _explain_failure(last_error: str | None) -> str:
+    """Turn a raw transport error into something an operator can act on.
+
+    The generic "the call failed" this replaced was true of a dead network, a wrong key and
+    an exhausted quota alike -- three problems with three completely different fixes.
+    """
+    raw = last_error or ""
+    lowered = raw.lower()
+    if "429" in raw or "rate limit" in lowered:
+        hint = ("Rate limited. On OpenRouter's free tier that is 50 requests per DAY across "
+                "all models -- it resets on its own, or add credits to raise it.")
+    elif "401" in raw or "403" in raw or "user not found" in lowered:
+        hint = "The key was rejected. Check it was pasted whole, and that it is for this endpoint."
+    elif "404" in raw:
+        hint = "The endpoint or model id was not found. Check the model slug still exists."
+    elif "timed out" in lowered or "timeout" in lowered:
+        hint = "The endpoint did not answer in time."
+    elif not raw:
+        hint = "No usable response."
+    else:
+        hint = "The call failed."
+    detail = "%s The agent is unaffected -- it falls back to offline retrieval." % hint
+    return "%s  [%s]" % (detail, raw) if raw else detail
+
+
+def _mask_key(key: str) -> str:
+    """`sk-abcd...wxyz` -- enough to recognize a key, never enough to use one.
+
+    The browser gets this and only this. The real key is held in memory on the server and
+    written to disk only when the operator explicitly asks for it to be persisted.
+    """
+    key = (key or "").strip()
+    if len(key) <= 8:
+        return "*" * len(key)
+    return "%s...%s" % (key[:4], key[-4:])
 
 
 class _AgentThread:
@@ -248,7 +287,125 @@ class AgentBridge:
             "done": True,
         }
 
+    # -- the optional model -------------------------------------------------------
+    #
+    # All three go through `_worker.call`, like every other agent access: the client is
+    # read on the agent thread during a turn, so it must be swapped there too.
+
+    def llm_config(self) -> dict:
+        """Current model configuration for the settings panel. Never returns the key."""
+        stats = self._worker.call(self.agent.model_stats)
+        client = self.agent.llm
+        return {
+            "mode": stats.get("mode", "off"),
+            "enabled": stats.get("enabled", False),
+            "model": stats.get("model", llm.DEFAULT_MODEL),
+            "base_url": stats.get("base_url", llm.DEFAULT_BASE_URL),
+            "has_key": client is not None,
+            "key_hint": _mask_key(client.api_key) if client is not None else "",
+            "disabled": stats.get("disabled", False),
+            "disabled_reason": stats.get("disabled_reason"),
+            "last_error": stats.get("last_error"),
+            "calls": stats.get("calls", 0),
+            "failures": stats.get("failures", 0),
+            "skipped": stats.get("skipped", 0),
+            "prompt_tokens": stats.get("prompt_tokens", 0),
+            "completion_tokens": stats.get("completion_tokens", 0),
+            "mean_ms": stats.get("mean_ms", 0.0),
+            "modes": list(llm.MODES),
+            "default_model": llm.DEFAULT_MODEL,
+            "default_base_url": llm.DEFAULT_BASE_URL,
+        }
+
+    def set_llm_config(
+        self,
+        mode: str,
+        api_key: str | None,
+        model: str | None,
+        base_url: str | None,
+        persist: bool = False,
+    ) -> dict:
+        """Apply a new model configuration, optionally writing it to `.env`.
+
+        An empty `api_key` from the browser means "keep the key I already gave you" rather
+        than "clear it" -- the field is rendered masked, so treating blank as a deletion
+        would wipe the key every time someone changed only the mode. Clearing is done by
+        selecting mode `off`, which drops the client entirely.
+        """
+        current = self.agent.llm
+        key = (api_key or "").strip() or (current.api_key if current is not None else "")
+        model = (model or "").strip() or llm.DEFAULT_MODEL
+        base_url = (base_url or "").strip() or llm.DEFAULT_BASE_URL
+
+        self._worker.call(
+            lambda: self.agent.configure_llm(
+                api_key=key, mode=mode, model=model, base_url=base_url
+            )
+        )
+
+        saved = None
+        if persist:
+            # The one place a key touches disk, and only because the operator ticked the
+            # box. `.env` is gitignored; `update_env_file` preserves the template's
+            # comments so the file stays self-documenting.
+            values = {
+                llm.MODE_ENV: llm.resolve_mode(mode),
+                llm.API_KEY_ENV: key,
+                llm.MODEL_ENV: "" if model == llm.DEFAULT_MODEL else model,
+                llm.BASE_URL_ENV: "" if base_url == llm.DEFAULT_BASE_URL else base_url,
+            }
+            try:
+                saved = str(env_file.update_env_file(values))
+            except OSError as exc:
+                saved = "could not write .env: %s" % exc
+
+        config = self.llm_config()
+        config["saved_to"] = saved
+        return config
+
+    def test_llm(self) -> dict:
+        """One real round trip, so the operator learns whether the key works.
+
+        Closes the breaker first: the usual reason for pressing Test is that something was
+        broken and may now be fixed, and a latched-off client would answer instantly and
+        misleadingly with "no".
+        """
+        client = self.agent.llm
+        if client is None:
+            return {"ok": False, "detail": "No model configured. Set a key and a mode first."}
+
+        def probe() -> dict:
+            client.reenable()
+            before_failures = client.failures
+            started = time.perf_counter()
+            text = client.complete(
+                "Reply with the single word: ok", "ping", max_tokens=8
+            )
+            elapsed = (time.perf_counter() - started) * 1000.0
+            if text is None:
+                # Say WHY. `last_error` carries the provider's own words ("Rate limit
+                # exceeded: free-models-per-day"), which is the difference between a
+                # five-second fix and an hour of guessing.
+                return {
+                    "ok": False,
+                    "detail": _explain_failure(client.last_error),
+                    "error": client.last_error,
+                    "latency_ms": round(elapsed, 1),
+                    "failures": client.failures - before_failures,
+                }
+            return {
+                "ok": True,
+                "detail": "Model answered: %s" % (text[:80] or "(empty)"),
+                "latency_ms": round(elapsed, 1),
+            }
+
+        result = self._worker.call(probe)
+        result["config"] = self.llm_config()
+        return result
+
     # -- disclosure ---------------------------------------------------------------
 
     def stats(self) -> dict:
-        return self._worker.call(self.agent.latency_stats)
+        stats = self._worker.call(self.agent.latency_stats)
+        stats["llm"] = self.llm_config()
+        return stats

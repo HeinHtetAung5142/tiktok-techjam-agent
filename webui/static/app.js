@@ -289,16 +289,141 @@ function setView(view) {
   renderTarget();
 }
 
+/* ---------- model settings ----------
+ *
+ * The API key travels one way only: typed here, POSTed to the local server, and never
+ * sent back -- /api/llm returns a mask ("sk-1a2b...9f0e"). Nothing about the model is
+ * stored in this browser.
+ */
+
+function renderLlmChip(config) {
+  const label = $("stat-llm");
+  if (!config || !config.enabled) {
+    label.textContent = "off";
+    label.className = "";
+    return;
+  }
+  if (config.disabled) {
+    // Breaker tripped: a client is configured but the agent has stopped calling it and
+    // is running on offline retrieval. Say so, rather than showing a healthy mode.
+    label.textContent = config.mode + " (paused)";
+    label.className = "warn";
+    return;
+  }
+  label.textContent = config.mode;
+  label.className = "on";
+}
+
+function fillLlmForm(config) {
+  $("llm-mode").value = config.mode || "off";
+  $("llm-model").value = config.model || "";
+  $("llm-base").value = config.base_url || "";
+  $("llm-key").value = "";
+  const hint = $("llm-key-hint");
+  if (config.has_key) {
+    hint.textContent = `A key is set (${config.key_hint}). Leave blank to keep it; switch to "off" to clear it.`;
+  } else {
+    hint.textContent = "No key set. Without one the agent stays fully offline.";
+  }
+  renderLlmChip(config);
+}
+
+function llmStatus(text, kind) {
+  const node = $("llm-status");
+  node.textContent = text || "";
+  node.className = "modal-status" + (kind ? " " + kind : "");
+}
+
+async function openLlm() {
+  try {
+    const config = await api("/api/llm");
+    fillLlmForm(config);
+    let note = "";
+    if (config.disabled) {
+      note = "Paused: " + (config.disabled_reason || "repeated failures") +
+             ". The agent is using offline retrieval. Test connection re-enables it." +
+             (config.last_error ? " Last error: " + config.last_error : "");
+    } else if (config.last_error) {
+      note = "Last error: " + config.last_error;
+    } else if (config.calls) {
+      note = `${config.calls} calls, ${config.failures} failed, ${config.skipped} skipped · ` +
+             `${config.prompt_tokens + config.completion_tokens} tokens · ${config.mean_ms} ms mean`;
+    }
+    llmStatus(note, config.disabled ? "warn" : null);
+    $("llm-modal").hidden = false;
+    $("llm-mode").focus();
+  } catch (err) {
+    say("sys", "Could not read the model settings: " + err.message);
+  }
+}
+
+function closeLlm() {
+  $("llm-modal").hidden = true;
+}
+
+async function saveLlm() {
+  const mode = $("llm-mode").value;
+  const key = $("llm-key").value.trim();
+  llmStatus("Applying…");
+  try {
+    const config = await api("/api/llm", {
+      mode,
+      api_key: key,
+      model: $("llm-model").value.trim(),
+      base_url: $("llm-base").value.trim(),
+      persist: $("llm-persist").checked,
+    });
+    fillLlmForm(config);
+    let note;
+    if (!config.enabled) {
+      note = "Model off. The agent runs fully offline.";
+    } else if (mode === "expand") {
+      note = `Using ${config.model} in expand mode — experimental, and it changes retrieval.`;
+    } else {
+      note = `Using ${config.model} in ${config.mode} mode.`;
+    }
+    if (config.saved_to) note += " Saved to " + config.saved_to;
+    llmStatus(note, "ok");
+  } catch (err) {
+    llmStatus("Could not apply: " + err.message, "warn");
+  }
+}
+
+async function testLlm() {
+  llmStatus("Calling the model (up to 6s)…");
+  try {
+    const result = await api("/api/llm/test", {});
+    if (result.config) fillLlmForm(result.config);
+    llmStatus(
+      result.detail + (result.latency_ms ? ` (${result.latency_ms} ms)` : ""),
+      result.ok ? "ok" : "warn"
+    );
+  } catch (err) {
+    llmStatus("Test failed: " + err.message, "warn");
+  }
+}
+
 async function main() {
   $("composer").addEventListener("submit", send);
   $("reroll").addEventListener("click", reroll);
   $("reset").addEventListener("click", resetChat);
   $("view-card").addEventListener("click", () => setView("card"));
   $("view-full").addEventListener("click", () => setView("full"));
+  $("llm-open").addEventListener("click", openLlm);
+  $("llm-close").addEventListener("click", closeLlm);
+  $("llm-save").addEventListener("click", saveLlm);
+  $("llm-test").addEventListener("click", testLlm);
+  $("llm-modal").addEventListener("click", (event) => {
+    if (event.target === $("llm-modal")) closeLlm();   // click the backdrop to dismiss
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("llm-modal").hidden) closeLlm();
+  });
 
   try {
     await startSession();
     await reroll();
+    api("/api/llm").then(renderLlmChip).catch(() => {});   // chip only; never blocks the UI
     say("sys", "Tell the agent what you're shopping for. It will ask one attribute per turn.");
     $("input").focus();
   } catch (err) {

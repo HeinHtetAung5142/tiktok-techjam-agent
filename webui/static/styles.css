@@ -18,6 +18,14 @@
 
 * { box-sizing: border-box; }
 
+/* The `hidden` attribute must actually hide things.
+   The browser's own stylesheet says `[hidden] { display: none }`, but ANY author rule that
+   sets `display` beats it -- the cascade puts author rules above user-agent rules whatever
+   the specificity. So `.modal { display: flex }` silently defeated `el.hidden = true` and
+   the model dialog could not be dismissed by the close button, Escape, or the backdrop.
+   Declared once, globally, so the next element toggled via `.hidden` cannot hit this. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
@@ -209,3 +217,45 @@ b { font-weight: 600; }
 .composer input:focus { outline: none; border-color: var(--accent); }
 .composer-note { margin: 0 14px 12px; color: var(--dim); font-size: 11.5px; min-height: 14px; }
 .composer-note.warn { color: var(--gold); }
+
+/* ---------- model settings ---------- */
+
+.chip-btn { cursor: pointer; font: inherit; font-size: 12px; }
+.chip-btn:hover { border-color: var(--accent); color: var(--text); }
+.chip-btn b.on   { color: var(--green); }
+.chip-btn b.warn { color: var(--gold); }
+
+.modal {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(6, 8, 11, .72);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.modal-card {
+  width: min(520px, 100%); max-height: 90vh; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 18px 20px 16px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .5);
+}
+.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.modal-head h2 { margin: 0; font-size: 15px; }
+.modal-note { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 8px 0 16px; }
+
+.field { display: block; margin-bottom: 13px; }
+.field > span { display: block; font-size: 11px; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); margin-bottom: 5px; }
+.field input, .field select {
+  width: 100%; box-sizing: border-box;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; font: inherit; font-size: 13px;
+}
+.field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
+.field .hint { display: block; color: var(--dim); font-size: 11px; margin-top: 5px; }
+
+.check { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: var(--muted); line-height: 1.45; }
+.check input { margin-top: 2px; }
+.check code { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+
+.modal-status { min-height: 16px; margin: 14px 0 0; font-size: 12px; color: var(--muted); line-height: 1.45; }
+.modal-status.ok   { color: var(--green); }
+.modal-status.warn { color: var(--gold); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }

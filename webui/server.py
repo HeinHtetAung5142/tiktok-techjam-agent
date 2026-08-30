@@ -18,6 +18,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from starter import env_file
 from webui import target
 from webui.agent_bridge import DISPLAY_DEPTH, MAX_TURNS, TOP_K, AgentBridge
 
@@ -76,6 +77,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._static(path[len("/static/"):])
             if path == "/api/stats":
                 return self._json(BRIDGE.stats())
+            if path == "/api/llm":
+                return self._json(BRIDGE.llm_config())
             self._json({"error": "not found"}, status=404)
         except Exception as exc:  # never show a traceback page
             self._fail(exc)
@@ -106,6 +109,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/end":
                 BRIDGE.close_session(str(body.get("session_id") or ""))
                 return self._json({"ok": True})
+            if path == "/api/llm":
+                return self._llm_config(body)
+            if path == "/api/llm/test":
+                # One real round trip. Blocks for up to the client timeout (6s), which is
+                # why it is its own endpoint rather than part of saving.
+                return self._json(BRIDGE.test_llm())
             self._json({"error": "not found"}, status=404)
         except ValueError as exc:
             self._json({"error": str(exc)}, status=400)
@@ -123,6 +132,25 @@ class Handler(BaseHTTPRequestHandler):
             payload = BRIDGE.turn(session_id, message)
         except KeyError:
             return self._json({"error": "unknown session", "expired": True}, status=409)
+        self._json(payload)
+
+    def _llm_config(self, body: dict) -> None:
+        """Apply a model configuration from the settings panel.
+
+        The API key is the one value in this whole UI that must never come back out, so
+        it goes in and only a mask comes back (`agent_bridge._mask_key`). It is never
+        logged: `log_message` only ever sees the path.
+        """
+        mode = str(body.get("mode") or "off").strip().lower()
+        if mode not in ("off", "freeform", "expand"):
+            raise ValueError("mode must be one of off, freeform, expand")
+        payload = BRIDGE.set_llm_config(
+            mode=mode,
+            api_key=str(body.get("api_key") or ""),
+            model=str(body.get("model") or ""),
+            base_url=str(body.get("base_url") or ""),
+            persist=bool(body.get("persist")),
+        )
         self._json(payload)
 
     def _fail(self, exc: Exception) -> None:
@@ -149,11 +177,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--catalog", default="data/catalog.jsonl")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--env-file", default=None, help="path to the .env to create/load (default: repo root)"
+    )
+    parser.add_argument(
+        "--no-env",
+        dest="env",
+        action="store_false",
+        help="do not create or read a .env file at all",
+    )
     args = parser.parse_args(argv)
+
+    # Scaffold and load `.env` BEFORE constructing the agent -- `Agent()` reads the
+    # environment once, in its constructor, via `llm.client_from_env()`. A real export in
+    # the shell still wins; the file only fills gaps.
+    if args.env:
+        record = env_file.bootstrap(args.env_file)
+        if record["created"]:
+            print("Created %s (offline defaults; add a key there or in the UI)." % record["path"])
+        if record["loaded"]:
+            print("Loaded from %s: %s" % (record["path"], ", ".join(record["loaded"])))
 
     global BRIDGE
     print("Building the agent index over 50k products (this takes ~15s)...", flush=True)
     BRIDGE = AgentBridge(args.catalog)
+    config = BRIDGE.llm_config()
+    if config["enabled"]:
+        print(f"Model: {config['model']} in `{config['mode']}` mode.", flush=True)
+    else:
+        print("Model: off (fully offline). Change it with the Model button in the UI.", flush=True)
     print(
         f"Ready in {BRIDGE.agent.construction_seconds:.1f}s. "
         f"Serving http://{args.host}:{args.port}/  (Ctrl-C to stop)",

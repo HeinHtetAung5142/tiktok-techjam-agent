@@ -27,6 +27,7 @@ after each variant.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -35,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl  # noqa: E402
 from starter import agent as A  # noqa: E402
+from starter import llm as L  # noqa: E402
 from starter import ranking as R  # noqa: E402
 from starter import retrieval as T  # noqa: E402
 from starter.agent import Agent  # noqa: E402
@@ -137,6 +139,17 @@ def main() -> None:
     unknown = [k for k in selected if k not in AXES]
     if unknown:
         raise SystemExit("unknown axis %s; valid: %s" % (unknown, sorted(AXES)))
+
+    # `Agent()` reads the environment for an optional model (feature 13). In `expand` mode
+    # the model joins retrieval and identical input is no longer guaranteed to produce
+    # identical output -- which silently invalidates every delta below, and would surface
+    # only as a confusing control-arm mismatch. Refuse the run instead.
+    inherited_mode = L.resolve_mode(os.environ.get(L.MODE_ENV))
+    if inherited_mode != L.MODE_OFF:
+        raise SystemExit(
+            "%s=%s is set in this shell. Sweeping requires the deterministic offline "
+            "agent; unset it (or set it to 'off') and re-run." % (L.MODE_ENV, inherited_mode)
+        )
 
     samples = load_jsonl(args.dataset)
     catalog_ids, categories, products = catalog_index(args.catalog)

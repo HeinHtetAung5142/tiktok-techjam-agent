@@ -75,4 +75,4 @@ What it does not fix, what it made worse, and what should come next.
 | 10 | [Field-factor calibration](10-field-factor-calibration.md) | 2 | **0.912205** |
 | 11 | [Free-form input robustness](11-freeform-input-robustness.md) | 3 | 0.912205 (byte-identical) |
 | 12 | [Intent override, properly](12-intent-override.md) | 2 | 0.912205 (byte-identical) |
-| 13 | [Optional SiliconFlow LLM (Qwen3-8B)](13-siliconflow-llm.md) | 3 | 0.912205 (byte-identical; off by default) |
+| 13 | [Optional language model](13-optional-llm.md) | 3 | 0.912205 (byte-identical; off by default) |

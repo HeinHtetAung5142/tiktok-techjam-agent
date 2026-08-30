@@ -96,8 +96,10 @@ py tools/feasibility_report.py                       # latency / token / cost di
 py tools/sweep_constants.py --list                   # show the tunable axes
 py tools/sweep_constants.py --axis A B                # coordinate-descent sweep over those axes
 py tools/verify_features.py                          # 63 feature/contract checks (exit 1 on regression)
-py tools/verify_llm.py                               # 52 LLM checks; stubs HTTP, needs no key
+py tools/verify_llm.py                               # 96 LLM/env/breaker checks; stubs HTTP, no key
 py tools/llm_smoke.py                                # check a real SiliconFlow key end-to-end
+py tools/benchmark_llms.py --offline                 # compare models; --offline uses stubs
+py tools/benchmark_llms.py --models A,B --sessions 50  # ...and score them against a control arm
 ```
 
 `verify_features.py` and `verify_llm.py` are the pre-submission gate: both exit non-zero on a
@@ -127,7 +129,7 @@ longer to buy rank, and the phrase routes (feature 06) add a handful of extra FT
 07, and the project's only third-party dependencies. Everything else is standard library. The agent
 makes **no network call in its default configuration**, which is the one the organizer runs; the
 optional SiliconFlow route added in feature 13 is `urllib.request` and is off unless both
-`SILICONFLOW_API_KEY` and `SHOPPING_COPILOT_LLM` are set. Anything further added must be pinned there too, or
+`SHOPPING_COPILOT_API_KEY` and `SHOPPING_COPILOT_LLM` are set. Anything further added must be pinned there too, or
 the organizer cannot reproduce the run: `pip install -r requirements.txt` is a required step in our
 setup instructions, not an optional one.
 
@@ -168,6 +170,7 @@ starter/dialog_state.py    per-session slots, evidence accumulation, question po
 starter/ranking.py         IDF coverage + phrase reranking over the fused candidate pool
 starter/dense_retrieval.py offline LSA (TF-IDF + Truncated SVD) embeddings, no file I/O
 starter/llm.py             OPTIONAL SiliconFlow Qwen3-8B client; off by default, stdlib-only
+starter/env_file.py        .env scaffolding/loading; NEVER imported by the scored path
 ```
 
 Keep the contract surface in `agent.py`; everything else is imported.
@@ -408,12 +411,26 @@ Coordination + Evaluation. **Individual assignments are still TBD.**
 
 ### Model policy
 
-**Provider chosen: SiliconFlow, model `Qwen/Qwen3-8B` (permanently free), and it is OFF by
-default** — see `docs/features/13-siliconflow-llm.md`. The default configuration is the judged one
+**Provider: OpenRouter, model `inclusionai/ling-3.0-flash-fin:free`, and it is OFF by default.**
+SiliconFlow was the original choice (`docs/features/13-optional-llm.md`) but its free tier
+needs mainland-Chinese real-name verification, so no key was ever obtained against it; the
+default moved to OpenRouter, which needs no identity check. **The provider is pluggable**: the
+client is plain OpenAI-compatible chat completions, so `SHOPPING_COPILOT_BASE_URL` +
+`SHOPPING_COPILOT_MODEL` point it at SiliconFlow, a local Ollama, or anything else — setup
+recipes in `docs/LLM_SETUP.md`. The env vars are now provider-neutral `SHOPPING_COPILOT_*`;
+the old `SILICONFLOW_*` names still work as aliases and `.env` migrates itself on the next
+write. The `SiliconFlowClient` class name is still historical.
+
+The model was picked by **measurement** (`py tools/benchmark_llms.py`, run twice): it was the
+only free slug scoring 100% on all four probes, at ~1.5s. **Two live gotchas:** OpenRouter's
+free tier is **50 requests/day** shared across models (one benchmark run over five models
+spends half of it, and exhaustion returns 429 on everything — looks exactly like a bad key),
+and free pools are rate-limited upstream per model on top of that. Free slugs come and go; if
+the default fails, re-run the benchmark and take the winner. The default configuration is the judged one
 and makes no model call at all; a full run with the model code in place is **byte-identical** to
 `results_after_fieldfactors.json`, sessions array included.
 
-Enabling requires **both** `SILICONFLOW_API_KEY` and `SHOPPING_COPILOT_LLM`; neither alone does
+Enabling requires **both** `SHOPPING_COPILOT_API_KEY` and `SHOPPING_COPILOT_LLM`; neither alone does
 anything, and an unrecognized mode fails closed to `off`. Modes:
 
 | Mode | Reach | Score risk |
@@ -423,7 +440,13 @@ anything, and an unrecognized mode fails closed to `off`. Modes:
 | `expand` | adds retrieval route 5 at weight 0.25 | real but tiny; **unmeasured against the live model** |
 
 Everything fails soft: timeout, HTTP error, bad JSON, or no network returns `None` and the agent
-falls through to the pipeline that scores 0.912205 on its own. Verified, not asserted — a full
+falls through to the pipeline that scores 0.912205 on its own. Feature 14 adds a **circuit
+breaker** on top: 2 consecutive connection failures, 3 failures of any kind, or 3 consecutive
+successes slower than 4.5 s latch the client off for the rest of the process, so a dead endpoint
+costs one timeout rather than one per turn. `.env` is scaffolded and loaded by `webui/` and
+`tools/` (never by the evaluator, which reads `os.environ` directly), a real environment variable
+always wins over the file, and the WebUI's **Model** button changes mode/key/model live via
+`Agent.configure_llm`. Verified, not asserted — a full
 200-session run with `expand` configured *and every socket raising* is byte-identical too.
 
 Two cautions before anyone enables `expand` for real. **It has only ever been measured against

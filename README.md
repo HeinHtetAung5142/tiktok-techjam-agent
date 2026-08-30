@@ -150,23 +150,47 @@ must be disclosed. Token usage is a feasibility metric, not part of the core tec
 
 ### Our disclosure
 
-**No model. No network. No credentials. No cost.**
+**The submitted configuration makes no model call.** There is an optional hosted model in the
+repo, and it is off unless two environment variables are both set — which they are not in the
+configuration you run.
 
-| Item | Value |
+| Item | Value (submitted default) |
 |---|---|
 | LLM / external API | **None** — no API calls of any kind |
 | Network access required | **None.** Runs fully offline |
-| API keys / environment variables | **None** |
-| Estimated model cost | **$0.00** |
+| API keys / environment variables | **None required.** `SHOPPING_COPILOT_API_KEY` + `SHOPPING_COPILOT_LLM` enable the optional route; unset by default |
+| Estimated model cost | **$0.00** — nothing is called, and the optional model is a permanently-free tier |
 | Reported token usage | `0` prompt, `0` completion — honestly zero, not unreported |
 
 Retrieval is entirely local: an in-memory SQLite **FTS5** index plus offline **LSA** embeddings
 (TF-IDF + Truncated SVD) computed at construction from the catalog itself. Nothing is downloaded
 at runtime and no pretrained model weights are loaded from disk.
 
-Because official judging may disable network access, note there is **no fallback path to
-describe** — the offline path is the only path, so the agent behaves identically with the network
-disabled.
+#### The optional model
+
+`starter/llm.py` can call `inclusionai/ling-3.0-flash-fin:free` on OpenRouter's OpenAI-compatible
+endpoint. It is standard-library `urllib.request`, so it adds no dependency, and it requires
+**both**
+`SHOPPING_COPILOT_API_KEY` and `SHOPPING_COPILOT_LLM` — neither alone does anything, and an
+unrecognized mode fails closed to `off`. Both may live in a gitignored `.env`, which the WebUI
+and the tools scaffold and load (the evaluator never reads it, and a real environment variable
+always wins). Modes are `off` (default), `freeform` (manual-testing UI
+only, unreachable while scoring) and `expand` (adds one low-weight retrieval route; experimental
+and unmeasured against the live model). No key is in the repo; configuration is environment-only.
+The variable names are historical: `starter/llm.py` speaks plain OpenAI-compatible chat
+completions, so any such endpoint works — OpenRouter (the default), a local Ollama,
+SiliconFlow — with no code change. **Setup instructions: `docs/LLM_SETUP.md`.** Rationale and measurements:
+`docs/features/13-optional-llm.md`.
+
+Repeated failure or sustained slowness latches the client off entirely (2 connection failures, 3
+failures of any kind, or 3 responses slower than 4.5 s), so an unreachable endpoint costs one
+timeout rather than one per turn — see `docs/features/13-optional-llm.md`.
+
+Because official judging may disable network access, the fallback was measured rather than
+asserted. A full 200-session run with `expand` configured **and every socket raising** produces a
+results document that is byte-identical to `results_after_fieldfactors.json` — sessions array
+included. Every model failure (timeout, HTTP error, bad JSON, no network) returns `None` and the
+agent falls through to the offline pipeline, which scores 0.912205 on its own.
 
 ### Measured latency
 

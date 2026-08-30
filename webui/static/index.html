@@ -18,8 +18,63 @@
     <span class="chip">turn <b id="stat-turn">0</b>/<span id="stat-maxturn">10</span></span>
     <span class="chip">latency <b id="stat-latency">—</b></span>
     <span class="chip">tokens <b id="stat-tokens">0</b></span>
+    <button id="llm-open" class="chip chip-btn" title="Configure the optional language model">
+      model <b id="stat-llm">off</b>
+    </button>
   </div>
 </header>
+
+<!-- Model settings. Hidden until asked for; the agent is fully offline without it. -->
+<div class="modal" id="llm-modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="llm-title">
+    <div class="modal-head">
+      <h2 id="llm-title">Language model</h2>
+      <button id="llm-close" class="btn ghost" aria-label="Close">✕</button>
+    </div>
+
+    <p class="modal-note">
+      Optional. The agent retrieves entirely offline by default and scores 0.912205 that way —
+      the model only helps interpret free-form typing. Your key stays on this machine.
+    </p>
+
+    <label class="field">
+      <span>Mode</span>
+      <select id="llm-mode">
+        <option value="off">off — no model call at all (default)</option>
+        <option value="freeform">freeform — understand my typing (recommended)</option>
+        <option value="expand">expand — also add retrieval keywords (experimental)</option>
+      </select>
+    </label>
+
+    <label class="field">
+      <span>API key</span>
+      <input id="llm-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…">
+      <small id="llm-key-hint" class="hint"></small>
+    </label>
+
+    <label class="field">
+      <span>Model</span>
+      <input id="llm-model" type="text" autocomplete="off" spellcheck="false" placeholder="Qwen/Qwen3-8B">
+    </label>
+
+    <label class="field">
+      <span>Base URL</span>
+      <input id="llm-base" type="text" autocomplete="off" spellcheck="false" placeholder="https://api.siliconflow.cn/v1">
+    </label>
+
+    <label class="check">
+      <input id="llm-persist" type="checkbox">
+      <span>Save to <code>.env</code> so it survives a restart (gitignored — never committed)</span>
+    </label>
+
+    <p class="modal-status" id="llm-status"></p>
+
+    <div class="modal-actions">
+      <button id="llm-test" class="btn ghost">Test connection</button>
+      <button id="llm-save" class="btn primary">Apply</button>
+    </div>
+  </div>
+</div>
 
 <section class="target" id="target">
   <div class="target-head">

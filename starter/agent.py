@@ -119,10 +119,50 @@ class Agent:
         }
 
     def model_stats(self) -> dict:
-        """Model-side feasibility disclosure, or an explicit "no model" record."""
+        """Model-side feasibility disclosure, or an explicit "no model" record.
+
+        `enabled` means "a client is configured", not "it is currently being called": a
+        tripped circuit breaker (starter/llm.py) reports `enabled: True, disabled: True`,
+        which is the distinction an operator needs to see.
+        """
         if self.llm is None:
             return {"enabled": False, "mode": llm_module.MODE_OFF}
         return {"enabled": True, "mode": self.llm_mode, **self.llm.stats()}
+
+    def configure_llm(
+        self,
+        api_key: str | None = None,
+        mode: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+    ) -> dict:
+        """Swap the optional model at runtime. Returns the new `model_stats()`.
+
+        Exists for the WebUI's model panel, so an operator can paste a key or switch mode
+        without paying the ~15 s index rebuild. **Nothing on the scored path calls this**
+        -- the evaluator constructs an `Agent` and never touches it, so the judged run is
+        whatever the environment said at construction, exactly as before.
+
+        An empty key or `mode="off"` clears the client outright, which is the honest way
+        to turn the model back off: there is then no object left for anything to call.
+        Live sessions are re-pointed too, since `DialogState` captured the old client at
+        `reset()` and would otherwise keep using it for the rest of its conversation.
+        """
+        key = (api_key or "").strip()
+        resolved = llm_module.resolve_mode(mode)
+        if not key or resolved == llm_module.MODE_OFF:
+            self.llm, self.llm_mode = None, llm_module.MODE_OFF
+        else:
+            self.llm = llm_module.SiliconFlowClient(
+                api_key=key,
+                model=(model or llm_module.DEFAULT_MODEL).strip() or llm_module.DEFAULT_MODEL,
+                base_url=(base_url or llm_module.DEFAULT_BASE_URL).strip()
+                or llm_module.DEFAULT_BASE_URL,
+            )
+            self.llm_mode = resolved
+        for state in self._sessions.values():
+            state.llm = self.llm
+        return self.model_stats()
 
     def _usage_since(self, prompt_before: int, completion_before: int) -> dict:
         """Honest per-turn token counts for this turn's model calls."""
