@@ -205,14 +205,16 @@ Recording these matters as much as the wins:
 Work was split along the four pillars of the problem statement. Every feature carries a
 measured before/after score delta in the project's feature log.
 
-| Pillar | Owner | Scope |
+| Pillar | Owners (lead first) | Scope |
 |---|---|---|
-| Retrieval & Routing | _TODO_ | FTS5 index, dual-track routing, multi-route retrieval and RRF fusion, phrase routes, dense LSA route |
-| Dialog & Ranking | _TODO_ | Slot state and evidence accumulation, clarification policy, rank-vs-turn arbitrage, reranker and field-factor calibration |
-| Integration | _TODO_ | Agent contract wiring, optional model client and circuit breaker, offline fallback, local demo UI, submission packaging |
-| Coordination & Evaluation | _TODO_ | Evaluator analysis, score ratchet and verification suites, feasibility measurement, documentation and reporting |
+| Retrieval & Routing | Hein Htet Aung, TheZincTZ, Xavier Tay | FTS5 index, dual-track routing, multi-route retrieval and RRF fusion, phrase routes, dense LSA route |
+| Dialog & Ranking | Xavier Tay, Caspian | Slot state and evidence accumulation, clarification policy, rank-vs-turn arbitrage, reranker and field-factor calibration |
+| Integration | TheZincTZ, Xavier Tay, Hein Htet Aung | Agent contract wiring, optional model client and circuit breaker, offline fallback, local demo UI, submission packaging |
+| Coordination & Evaluation | Hein Htet Aung, Caspian | Evaluator analysis, score ratchet and verification suites, feasibility measurement, documentation and reporting |
 
-> Fill in the owner column before submitting.
+Pillars are ownership areas, not exclusive assignments: the four of us moved across them as
+the measurements dictated, and several features were built jointly. Per-feature authorship
+is recorded commit by commit in the project's git history.
 
 ---
 
@@ -222,7 +224,7 @@ measured before/after score delta in the project's feature log.
 |---|---|
 | Python version | 3.10+ (verified on 3.14.7 and 3.12.0) |
 | Dependency install | `pip install -r requirements.txt` |
-| One command to run | `py -m evaluator.local_evaluator` |
+| One command to run | `python3 -m evaluator.local_evaluator` (Windows outside a venv: `py -m ...`) |
 | Environment variables | none required |
 | Network access | none required; no call is made in this configuration |
 | External services | none |

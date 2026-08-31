@@ -104,7 +104,16 @@ from the catalog itself.
 
 ### In the official harness
 
+**macOS / Linux** (and any activated venv):
+
 ```bash
+python3 -m evaluator.local_evaluator
+```
+
+**Windows, outside a venv** — `python3` there is the Microsoft Store stub, so use the
+launcher:
+
+```powershell
 py -m evaluator.local_evaluator
 ```
 
