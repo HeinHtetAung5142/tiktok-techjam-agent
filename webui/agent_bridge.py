@@ -119,7 +119,9 @@ class _AgentThread:
 
     def _run(self, catalog_path: str) -> None:
         try:
-            self.agent = Agent(catalog_path)
+            # freeform=True: a person is typing, so the opening message gets facet
+            # detection and the extended vocabularies too. The evaluator never sets this.
+            self.agent = Agent(catalog_path, freeform=True)
         except BaseException as exc:  # surfaced to the constructor
             self._startup_error = exc
             self._ready.set()
@@ -213,6 +215,22 @@ class AgentBridge:
         ]
         return result, self._deep_list(session_id, disclosed)
 
+    def _expansion_terms(self, state):
+        """The same expansion terms `Agent._respond` used this turn, or None.
+
+        Mirrors the gate in `starter/agent.py` rather than reimplementing it: only an
+        `expand`-mode client produces terms, and everything else -- no key, `off`,
+        `freeform`, a tripped breaker -- yields None, which makes route 5 inert.
+        """
+        try:
+            from starter import llm as llm_module
+
+            if self.agent.llm is None or self.agent.llm_mode != llm_module.MODE_EXPAND:
+                return None
+            return llm_module.expand_query(self.agent.llm, state.evidence_text())
+        except Exception:
+            return None
+
     def _deep_list(self, session_id: str, disclosed: list[str]) -> list[str]:
         """The ranking behind the agent's answer, for display only.
 
@@ -238,6 +256,18 @@ class AgentBridge:
                 DISPLAY_DEPTH,
                 reranker=lambda pool: self.agent.reranker.order(pool, phrases),
                 phrases=phrases,
+                # Must mirror `Agent._respond` exactly. These two were missing, and the
+                # consistency guard below caught it: the agent applies exclusions and
+                # facets, so without them this pass ranks a different product first, the
+                # heads disagree, and the page collapses to the single disclosed row. It
+                # showed up as "not polyester" (feature 15) returning one result instead
+                # of fifty. Anything `_respond` passes to `retrieve` belongs here too.
+                avoid_terms=state.avoid_terms(),
+                facets=state.facet_values(),
+                # Costs no extra HTTP: `SiliconFlowClient.complete` caches on the prompt,
+                # and `_respond` has already asked this exact question for this turn, so
+                # this is a cache hit. None whenever no model is configured.
+                extra_terms=self._expansion_terms(state),
             )
             deep = [str(item.get("parent_asin", "")) for item in ranked]
         except Exception:

@@ -95,12 +95,24 @@ py tools/score_delta.py <before.json> <after.json>   # markdown delta table for 
 py tools/feasibility_report.py                       # latency / token / cost disclosure tables
 py tools/sweep_constants.py --list                   # show the tunable axes
 py tools/sweep_constants.py --axis A B                # coordinate-descent sweep over those axes
-py tools/verify_features.py                          # 63 feature/contract checks (exit 1 on regression)
+py tools/verify_features.py                          # 90 feature/contract/isolation checks
 py tools/verify_llm.py                               # 96 LLM/env/breaker checks; stubs HTTP, no key
+py tools/score_ratchet.py                            # REFUSES a change that lowers the score
 py tools/llm_smoke.py                                # check a real SiliconFlow key end-to-end
 py tools/benchmark_llms.py --offline                 # compare models; --offline uses stubs
 py tools/benchmark_llms.py --models A,B --sessions 50  # ...and score them against a control arm
 ```
+
+**`score_ratchet.py` is the rule: TechnicalScore may rise or stay level, never fall.** Run it after
+any change under `starter/`; non-zero exit means revert. It separates *byte-identical* (the strong
+result, and the only honest way to claim "no effect on scoring") from merely *score-equal*, where
+offsetting session movements can hide a regression the 800-session private set would not forgive.
+
+**How a free-form feature is made score-safe.** The scored and human paths are disjoint — a full run
+makes 566 `observe()` calls and **0** `_observe_freeform` calls. So every such capability enters as
+an optional parameter that is *empty on every scored turn* (`avoid_terms`, `facets`, `extra_terms`),
+guarded by `if x:`. `verify_features.py` asserts the 0-free-form-calls invariant, which is what keeps
+that argument true as the regexes evolve rather than letting it decay into folklore.
 
 `verify_features.py` and `verify_llm.py` are the pre-submission gate: both exit non-zero on a
 regression, and neither needs network or credentials. Two robustness checks are reported as
@@ -170,6 +182,7 @@ starter/dialog_state.py    per-session slots, evidence accumulation, question po
 starter/ranking.py         IDF coverage + phrase reranking over the fused candidate pool
 starter/dense_retrieval.py offline LSA (TF-IDF + Truncated SVD) embeddings, no file I/O
 starter/llm.py             OPTIONAL SiliconFlow Qwen3-8B client; off by default, stdlib-only
+starter/facets.py          generic attribute facets (gender, neckline, ...); free-form path only
 starter/env_file.py        .env scaffolding/loading; NEVER imported by the scored path
 ```
 

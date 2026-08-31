@@ -69,7 +69,12 @@ class Agent:
         catalog_path: str | Path = "data/catalog.jsonl",
         llm=None,
         mode: str | None = None,
+        freeform: bool = False,
     ) -> None:
+        # Set only by callers that know a human is typing (the WebUI). The evaluator
+        # constructs `Agent(catalog)` and leaves this False, so the scored path is
+        # untouched. See DialogState.freeform.
+        self.freeform = freeform
         construction_started = time.perf_counter()
         self.index = CatalogIndex(catalog_path)
         self.reranker = Reranker(self.index)
@@ -178,7 +183,7 @@ class Agent:
     def reset(self, session_id: str, user_profile: dict) -> None:
         # The profile is anonymized and may be used for personalization. Measured to carry
         # no retrieval signal on this dataset -- see the demoted note in CLAUDE.md.
-        self._sessions[session_id] = DialogState(llm=self.llm)
+        self._sessions[session_id] = DialogState(llm=self.llm, freeform=self.freeform)
 
     def respond(
         self,
@@ -235,6 +240,9 @@ class Agent:
             extra_terms=extra_terms,
             # Empty on every scored turn -- only a person typing can rule a value out.
             avoid_terms=state.avoid_terms(),
+            # Likewise empty on every scored turn: facets are written only by
+            # `DialogState._observe_freeform`, which no simulator reply reaches.
+            facets=state.facet_values(),
         )
 
         # Recommendations are scored every turn, so asking costs us nothing and is the

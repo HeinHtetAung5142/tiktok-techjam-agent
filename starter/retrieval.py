@@ -59,6 +59,13 @@ MAX_PHRASE_ROUTES = 12
 # issued and no route is appended, which is what makes the default path byte-identical.
 EXPANSION_ROUTE_WEIGHT = 0.25
 
+# Facet route (free-form path only -- see starter/facets.py). Weighted at the category
+# route's level: a title-scoped attribute match is a genuine signal about what the product
+# *is*, but it must not outrank the keyword route's own top picks on its own. Its real
+# work is getting facet-matching products into the pool; `demote_title_forms` settles the
+# order afterwards.
+FACET_ROUTE_WEIGHT = 0.3
+
 
 # How many fused candidates a reranker gets to reorder. Bigger pools give the reranker
 # more chances to rescue a buried target, but every extra candidate is also a chance to
@@ -179,6 +186,7 @@ class CatalogIndex:
         self.rowid_by_asin: dict[str, int] = {}
         self.document_count = 0
         self._profile_cache: dict[str, tuple[dict[str, float], str]] = {}
+        self._title_cache: dict[str, str] = {}
         self._document_frequency_cache: dict[str, int] = {}
         self.dense_index = None
         self._build_index()
@@ -380,6 +388,7 @@ class CatalogIndex:
         phrases: list[str] | None = None,
         extra_terms: list[str] | None = None,
         avoid_terms: list[str] | None = None,
+        facets: dict[str, str] | None = None,
     ) -> list[dict]:
         base_expression = or_expression(query_terms)
         if not base_expression:
@@ -447,6 +456,24 @@ class CatalogIndex:
             except sqlite3.Error:
                 pass
 
+        # Route 6: facet route -- title-scoped, so a stated attribute ("men", "round
+        # neck") is matched where the catalog actually asserts it rather than wherever
+        # keyword spam happens to mention it. Its job is to get facet-matching products
+        # *into* the pool at all; the demotion below then settles the order. Absent by
+        # default (`facets` is empty on every scored turn -- only a person typing can set
+        # one), in which case not one statement in this block executes.
+        if facets:
+            try:
+                from starter import facets as facets_module
+
+                facet_expression = facets_module.title_expression(facets)
+                if facet_expression:
+                    facet_ids = self.run_ranked_query(facet_expression, price_max, limit)
+                    if facet_ids:
+                        routes.append((facet_ids, FACET_ROUTE_WEIGHT))
+            except (sqlite3.Error, ImportError):
+                pass
+
         merged = self.fuse_rankings(routes, pool_k)
 
         # Safety net: if hard filters (buying track) narrowed things too far, backfill
@@ -477,7 +504,58 @@ class CatalogIndex:
             except Exception:
                 pass
 
+        # Sibling demotion, after reranking for the same reason exclusions are: a title
+        # that says "Women's" when they asked for men is asserting the opposite of the
+        # request, and no amount of term overlap should outrank that. Demotion, not
+        # deletion -- 1,350 titles legitimately carry both "men" and "women", and a short
+        # list is worse than a badly ordered one. Inert when `facets` is empty.
+        if facets:
+            try:
+                from starter import facets as facets_module
+
+                merged = self.demote_title_forms(merged, facets_module.sibling_forms(facets))
+            except Exception:
+                pass
+
         return [{"parent_asin": parent_asin} for parent_asin in merged[:top_k]]
+
+    def title_tokens(self, parent_asin: str) -> str:
+        """The product's title as a space-padded token string, cached.
+
+        Separate from `document_profile`, which spans every text column: the whole point
+        of facet matching is that the *title* is where the catalog states what a product
+        actually is, while the description is where keyword spam lives.
+        """
+        cached = self._title_cache.get(parent_asin)
+        if cached is not None:
+            return cached
+        rowid = self.rowid_by_asin.get(parent_asin)
+        if rowid is None:
+            return " "
+        row = self.connection.execute(
+            "SELECT title FROM products WHERE rowid = ?", (rowid,)
+        ).fetchone()
+        tokens_string = f" {' '.join(fts_tokens(str(row[0] or '')))} " if row else " "
+        if len(self._title_cache) >= MAX_PROFILE_CACHE:
+            self._title_cache.clear()
+        self._title_cache[parent_asin] = tokens_string
+        return tokens_string
+
+    def demote_title_forms(self, ordered: list[str], forms: list[str]) -> list[str]:
+        """Push candidates whose *title* asserts one of `forms` to the back."""
+        needles = []
+        for form in forms:
+            words = fts_tokens(form)
+            if words:
+                needles.append(f" {' '.join(words)} ")
+        if not needles:
+            return ordered
+        wanted, conflicting = [], []
+        for parent_asin in ordered:
+            title = self.title_tokens(parent_asin)
+            bucket = conflicting if any(needle in title for needle in needles) else wanted
+            bucket.append(parent_asin)
+        return wanted + conflicting
 
     def demote_terms(self, ordered: list[str], avoid_terms: list[str]) -> list[str]:
         """Push candidates whose text contains a ruled-out term to the back of the list.

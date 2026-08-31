@@ -78,3 +78,4 @@ What it does not fix, what it made worse, and what should come next.
 | 13 | [Optional language model](13-optional-llm.md) | 3 | 0.912205 (byte-identical; off by default) |
 | 14 | _model circuit breaker_ — no doc file; written up in CLAUDE.md's Model policy | 3 | 0.912205 (byte-identical) |
 | 15 | [Free-form negation and slot-aware questioning](15-freeform-negation.md) | 3 | 0.912205 (byte-identical) |
+| 16 | [Generic attribute facets + score ratchet](16-generic-facets.md) | 3 | 0.912205 (byte-identical) |

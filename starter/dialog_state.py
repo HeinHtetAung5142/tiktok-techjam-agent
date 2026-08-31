@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import re
 
+from starter import facets
+
 
 COLOR_RE = re.compile(
     r"\b(black|white|blue|red|pink|green|brown|gray|grey|purple|yellow|orange)\b", re.IGNORECASE
@@ -212,6 +214,24 @@ def detect_exclusions(message: str) -> dict[str, list[str]]:
     }
 
 
+def _strip_price_phrasing(text: str) -> str:
+    """Remove budget wording that has already become a numeric filter. Free-form only.
+
+    Only the matched span goes; the rest of the sentence is untouched, so "round neck,
+    blue, cotton, under 50 dollars, men tshirt" keeps every word that describes a product
+    and loses only "under 50 dollars".
+    """
+    cleaned = PRICE_PHRASE_RE.sub(" ", text)
+    cleaned = PRICE_DOLLAR_RE.sub(" ", cleaned)
+    # The currency noun is not part of either match ("under 50 dollars" -> the regex takes
+    # "under 50"), and on its own it is the highest-IDF token in the query.
+    cleaned = re.sub(r"\b(dollars?|bucks?|usd)\b", " ", cleaned, flags=re.IGNORECASE)
+    # Collapse the whitespace and now-dangling separators the removal leaves behind.
+    cleaned = re.sub(r"\s*,\s*,", ",", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,;")
+    return cleaned
+
+
 def slot_display(slot: str, value: float | str) -> str:
     """One slot value as the customer should see it."""
     return f"${float(value):.2f}" if slot == "price_max" else str(value)
@@ -220,7 +240,13 @@ def slot_display(slot: str, value: float | str) -> str:
 class DialogState:
     """Everything we have learned in one session."""
 
-    def __init__(self, llm=None) -> None:
+    def __init__(self, llm=None, freeform: bool = False) -> None:
+        # True only when the caller *knows* a person is typing -- the WebUI sets it, the
+        # evaluator never does. It exists for turn 1 alone: the opening message takes an
+        # early return below, so without this the most informative message of the session
+        # is the one message that gets no facet detection. Default False keeps every
+        # scored turn on exactly the code path it has always taken.
+        self.freeform = freeform
         # An optional SiliconFlowClient. Consulted *only* from `_observe_freeform`, which
         # the simulated customer cannot reach, so it cannot touch a scored turn. None
         # unless the operator configured a key and a mode -- see starter/llm.py.
@@ -234,6 +260,10 @@ class DialogState:
         # Values the person has ruled out ("not fully polyester"). Free-form only, so
         # always empty while scoring -- the simulator has no way to say "not".
         self.avoided: list[str] = []
+        # Generic attribute facets (gender, neckline, sleeve, fit, ...). Written only by
+        # `_observe_freeform`, so this stays `{}` for every scored turn and every consumer
+        # of `facet_values()` skips its facet block entirely. See starter/facets.py.
+        self.facets: dict[str, str] = {}
         # Free-form bookkeeping. Written on every turn, but read only from
         # `_observe_freeform` and `message`, so it stays inert on the scored path.
         self.last_asked: str | None = None
@@ -243,7 +273,9 @@ class DialogState:
         """Absorb one customer message into state."""
         self.corrections = []
 
-        detected = detect_constraints(message)
+        # `extended` is False for every scored turn, which is the narrow simulator
+        # vocabulary this has always used.
+        detected = detect_constraints(message, extended=self.freeform)
         for key, value in detected.items():
             # First-write-wins: a later contradicting value lands in an already-filled
             # slot and is dropped. Measured benign -- it fires in 3 of 200 sessions and
@@ -255,8 +287,26 @@ class DialogState:
         if turn == 1:
             # The opener carries the product category, which is the single most useful
             # retrieval signal in the whole session. Keep all of it.
-            self.evidence.append(message)
-            self.phrases.extend(phrase_units(message))
+            text = message
+            if self.freeform:
+                # A person's opener is usually their richest message -- "men tshirt",
+                # "sleeveless floral maxi dress for a wedding" -- so it must get the same
+                # treatment as every later turn. Guarded, so the scored path still
+                # appends the raw message and returns, exactly as before.
+                for key, values in detect_exclusions(message).items():
+                    for value in values:
+                        if value not in self.avoided:
+                            self.avoided.append(value)
+                        if self.slots[key] == value:
+                            self.slots[key] = None
+                for group, value in facets.detect_facets(message).items():
+                    self.facets.setdefault(group, value)
+                text = _strip_price_phrasing(message)
+            self.evidence.append(text)
+            self.phrases.extend(phrase_units(text))
+            if self.freeform:
+                for value in self.avoided:
+                    self._scrub(value)
             return
 
         exhausted = EXHAUSTED_RE.search(message)
@@ -358,7 +408,19 @@ class DialogState:
                 )
             self.slots[key] = value
 
+        # Any attribute the person stated, beyond the three slots. First statement wins
+        # per group, so a passing later mention cannot flip what they led with.
+        for group, value in facets.detect_facets(message).items():
+            self.facets.setdefault(group, value)
+
         text = CORRECTION_LEAD_IN_RE.sub("", message.strip()).strip()
+        # Budget phrasing has already been parsed into `price_max`, and leaving the words
+        # in the query double-counts them -- badly. Measured on "round neck, blue, cotton,
+        # under 50 dollars, men tshirt": `dollars` carries IDF 6.79, `under` 3.36 and `50`
+        # 3.07, together 33% of the entire query's IDF mass, on words that describe no
+        # product. `dollars` alone outweighed `tshirt`. The ceiling is still enforced --
+        # as a numeric filter, which is the only place it belongs.
+        text = _strip_price_phrasing(text)
         if text:
             self.evidence.append(text)
             self.phrases.extend(phrase_units(text))
@@ -450,14 +512,24 @@ class DialogState:
         """Values to keep out of the top of the list. Always empty while scoring."""
         return list(self.avoided)
 
+    def facet_values(self) -> dict[str, str]:
+        """Attributes stated in free prose. `{}` on every scored turn."""
+        return dict(self.facets)
+
     def price_max(self) -> float | None:
         value = self.slots["price_max"]
         return float(value) if value is not None else None
 
     def message(self, attribute: str | None) -> str:
         """Customer-facing text: what we did, then what we still need."""
-        if self.is_buying or self.avoided:
-            parts = [str(self.slots[slot]) for slot in HARD_FILTER_SLOTS if self.slots[slot]]
+        if self.is_buying or self.avoided or self.facets:
+            # Every constraint actually in play, not just the three that happen to have a
+            # slot. Saying "Narrowed to blue, cotton, under $50.00" to someone who also
+            # asked for a men's round-neck tee reads as those words having been ignored --
+            # they were not, they went into retrieval as evidence, but the agent had no
+            # way to say so. Facets first: they describe what the product *is*.
+            parts = list(facets.describe(self.facets))
+            parts += [str(self.slots[slot]) for slot in HARD_FILTER_SLOTS if self.slots[slot]]
             if self.slots["price_max"] is not None:
                 parts.append(f"under ${float(self.slots['price_max']):.2f}")
             # Saying the exclusion out loud is how a person can tell "not polyester"

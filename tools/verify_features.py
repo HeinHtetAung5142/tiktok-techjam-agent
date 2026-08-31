@@ -274,6 +274,169 @@ check("T3", "full list goes out the moment no more evidence is coming",
       disclosure_limit(1, 10, False) == 10)
 check("T3", "disclosure never exceeds top_k", disclosure_limit(5, 3, True) == 3)
 
+# ------------------------------------------------------ Generic facets
+print("\nFACETS -- arbitrary parameters on the free-form path")
+
+from starter import facets as F  # noqa: E402
+
+fx = DialogState()
+fx.observe("men tshirt", 1)
+fx.next_attribute()
+fx.observe("round neck, blue, cotton, under 50 dollars, men tshirt", 2)
+check("FACET", "gender, neckline and the three slots are all captured",
+      fx.facet_values().get("gender") == "men"
+      and fx.facet_values().get("neckline") == "crew neck"
+      and fx.slots == {"price_max": 50.0, "color": "blue", "material": "cotton"},
+      str(fx.facet_values()))
+check("FACET", "budget WORDS leave the query, the numeric ceiling stays",
+      "dollars" not in fx.evidence_text() and "under 50" not in fx.evidence_text()
+      and fx.price_max() == 50.0, repr(fx.evidence_text()))
+check("FACET", "product words survive the budget strip",
+      all(w in fx.evidence_text() for w in ["round neck", "blue", "cotton", "men tshirt"]),
+      repr(fx.evidence_text()))
+check("FACET", "the message names every active constraint, not just the three slots",
+      all(w in fx.message(None) for w in ["men", "crew neck", "blue", "cotton", "$50.00"]),
+      fx.message(None))
+
+op = DialogState(freeform=True)
+op.observe("mens v neck slim fit t shirt, not polyester, under 30 dollars", 1)
+check("FACET", "the OPENING message gets facets too when a human is typing",
+      op.facet_values() == {"gender": "men", "neckline": "v neck", "fit": "slim"},
+      str(op.facet_values()))
+check("FACET", "turn-1 negation and budget both handled on the free-form path",
+      op.avoid_terms() == ["polyester"] and op.price_max() == 30.0
+      and "dollars" not in op.evidence_text(), repr(op.evidence_text()))
+
+scored_open = DialogState()
+scored_open.observe("mens v neck slim fit t shirt, not polyester, under 30 dollars", 1)
+check("FACET", "the SCORED opener is untouched: no facets, no exclusions, raw evidence",
+      scored_open.facet_values() == {} and scored_open.avoid_terms() == []
+      and scored_open.evidence == ["mens v neck slim fit t shirt, not polyester, under 30 dollars"],
+      str(scored_open.evidence))
+check("FACET", "Agent defaults to freeform=False; only the WebUI opts in",
+      agent.freeform is False)
+
+check("FACET", "stating a value implies rejecting its siblings",
+      set(F.sibling_forms({"gender": "men"})) >= {"women", "ladies", "girls"}
+      and "men" not in F.sibling_forms({"gender": "men"}))
+check("FACET", "an unmentioned group contributes no siblings (silence is not a preference)",
+      F.sibling_forms({"gender": "men"}) == F.sibling_forms({"gender": "men"})
+      and not any(f in F.sibling_forms({"gender": "men"}) for f in ["v neck", "slim fit"]))
+check("FACET", "facet queries are TITLE-scoped (spam 'for men women teens' must not match)",
+      'title:"men"' in F.title_expression({"gender": "men"}),
+      F.title_expression({"gender": "men"}))
+check("FACET", "multi-word forms become phrase queries",
+      'title:"long sleeve"' in F.title_expression({"sleeve": "long sleeve"}),
+      F.title_expression({"sleeve": "long sleeve"}))
+check("FACET", "no facets stated -> empty expression and no siblings",
+      F.title_expression({}) == "" and F.sibling_forms({}) == [] and F.detect_facets("") == {})
+check("FACET", "adding a parameter is a dictionary entry, not new code",
+      len(F.FACET_GROUPS) >= 8 and "neckline" in F.FACET_GROUPS and "fit" in F.FACET_GROUPS,
+      "%d groups: %s" % (len(F.FACET_GROUPS), ", ".join(sorted(F.FACET_GROUPS))))
+
+# The WebUI's display-only second pass must apply every constraint the agent applied.
+# When it does not, the consistency guard in `_deep_list` fires and the page collapses to
+# the single disclosed row -- which is exactly how the missing `avoid_terms` (feature 15)
+# and `facets` were found. Compared structurally so a future kwarg cannot be forgotten.
+import ast as _ast  # noqa: E402
+
+
+def _retrieve_kwargs(path, function_name):
+    tree = _ast.parse(Path(path).read_text(encoding="utf-8"))
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.FunctionDef) and node.name == function_name:
+            for call in _ast.walk(node):
+                if isinstance(call, _ast.Call) and getattr(
+                    getattr(call.func, "attr", None), "__str__", lambda: ""
+                )() == "retrieve":
+                    return {kw.arg for kw in call.keywords}
+    return set()
+
+
+_repo = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_agent_kwargs = _retrieve_kwargs(_repo / "starter" / "agent.py", "_respond")
+_deep_kwargs = _retrieve_kwargs(_repo / "webui" / "agent_bridge.py", "_deep_list")
+check("FACET", "the WebUI deep list passes every constraint the agent does",
+      _agent_kwargs and _agent_kwargs <= _deep_kwargs,
+      "agent=%s missing from deep list=%s" % (
+          sorted(_agent_kwargs), sorted(_agent_kwargs - _deep_kwargs)))
+
+demoted = agent.index.demote_title_forms(
+    ["__missing_a__", "__missing_b__"], F.sibling_forms({"gender": "men"}))
+check("FACET", "demotion never drops a candidate, only reorders",
+      sorted(demoted) == ["__missing_a__", "__missing_b__"], str(demoted))
+
+fq = DialogState()
+fq.observe("men tshirt", 1)
+fq.next_attribute()
+fq.observe("round neck, blue, cotton, under 50 dollars, men tshirt", 2)
+res = agent.index.retrieve(
+    retrieval.terms(fq.evidence_text()), fq.and_terms(), fq.price_max(), 10,
+    reranker=lambda p: agent.reranker.order(p, fq.evidence_phrases()),
+    phrases=fq.evidence_phrases(), avoid_terms=fq.avoid_terms(), facets=fq.facet_values())
+titles = []
+for row in res:
+    titles.append(agent.index.connection.execute(
+        "SELECT title FROM products WHERE rowid = ?",
+        (agent.index.rowid_by_asin[row["parent_asin"]],)).fetchone()[0].lower())
+mens = sum(1 for t in titles if "men" in t and "women" not in t)
+check("FACET", "asking for men's clothing returns men's clothing", mens >= 7,
+      "%d of %d titles are men's (was 0 of 10 before facets)" % (mens, len(titles)))
+
+# ------------------------------------------- The score-isolation invariant
+#
+# Every free-form-only feature (11, 12, 15, facets) is score-neutral *by construction*
+# rather than by measurement, and the whole argument rests on one fact: no simulator reply
+# ever reaches `_observe_freeform`. That is a property of the regexes, and a future edit
+# widening one of them would silently put free-form code on the scored path. So assert it
+# rather than trusting it -- this check is what keeps the guarantee true over time.
+print("\nSCORE ISOLATION -- free-form code must be unreachable while scoring")
+
+from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl  # noqa: E402
+from starter import dialog_state as _ds  # noqa: E402
+
+_reached = {"freeform": 0, "observe": 0}
+_orig_ff, _orig_ob = _ds.DialogState._observe_freeform, _ds.DialogState.observe
+
+
+def _spy_ff(self, message):
+    _reached["freeform"] += 1
+    return _orig_ff(self, message)
+
+
+def _spy_ob(self, message, turn):
+    _reached["observe"] += 1
+    return _orig_ob(self, message, turn)
+
+
+_ds.DialogState._observe_freeform = _spy_ff
+_ds.DialogState.observe = _spy_ob
+try:
+    _samples = load_jsonl("data/public_set.jsonl")
+    _cids, _cats, _prods = catalog_index("data/catalog.jsonl")
+    _res = evaluate(Agent("data/catalog.jsonl"), _samples, _cids, _cats, _prods)
+finally:
+    _ds.DialogState._observe_freeform = _orig_ff
+    _ds.DialogState.observe = _orig_ob
+
+check("ISO", "the scored run actually exercised the dialog state",
+      _reached["observe"] > 500, "%d observe() calls" % _reached["observe"])
+check("ISO", "ZERO simulator replies reach the free-form branch",
+      _reached["freeform"] == 0,
+      "%d free-form calls (must be 0, or free-form features can move the score)"
+      % _reached["freeform"])
+check("ISO", "a full scored run still reproduces the score of record",
+      _res["recommended_technical_score"] == 0.912205,
+      str(_res["recommended_technical_score"]))
+
+_iso_state = DialogState()
+_iso_state.observe("I need a jacket", 1)
+_iso_state.observe("For that, what matters is: 100% Wool; Button closure", 2)
+check("ISO", "facets stay empty when only the simulator has spoken",
+      _iso_state.facet_values() == {} and _iso_state.avoid_terms() == [],
+      str(_iso_state.facet_values()))
+
+print("")
 check("T3", "no model is configured by default -- the judged configuration is offline",
       agent.llm is None and agent.llm_mode == "off",
       "llm=%r mode=%r" % (agent.llm, agent.llm_mode))
