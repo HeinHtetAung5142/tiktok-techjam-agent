@@ -19,6 +19,7 @@ TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
     "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
+    "still",
     "that", "the", "this", "to", "want", "with", "would", "you", "looking",
 }
 
