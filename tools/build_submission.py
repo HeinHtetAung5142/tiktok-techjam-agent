@@ -50,7 +50,15 @@ REPO = Path(__file__).resolve().parent.parent
 STARTER = REPO / "starter"
 BUNDLE = REPO / "submission"
 REFERENCE = REPO / "results" / "results_after_fieldfactors.json"
-REPORT = REPO / "docs" / "submission_report.md"
+
+# The bundle's two documents, authored in `docs/` so the bundle stays generated.
+# `submission_rules.md` requires it to carry setup instructions *and* a report *and* a
+# latency/token/cost disclosure -- so the README is setup only and the report gets its own
+# file, rather than a judge having to scroll past the method to find the install steps.
+DOCUMENTS = {
+    "README.md": REPO / "docs" / "submission_setup.md",
+    "REPORT.md": REPO / "docs" / "submission_report.md",
+}
 
 # Every module in `starter/`. `env_file.py` is never imported by the scored path -- that
 # isolation is asserted by tools/verify_llm.py -- but `llm.py` documents it and the WebUI
@@ -178,14 +186,15 @@ def build() -> None:
     (BUNDLE / "starter" / "agent.py").write_text(SHIM, encoding="utf-8")
 
     shutil.copyfile(REPO / "requirements.txt", BUNDLE / "requirements.txt")
-    if not REPORT.exists():
-        raise SystemExit(
-            f"missing {REPORT.relative_to(REPO)} -- the bundle's README is the required "
-            "report, and it is authored there so the bundle stays generated."
+    for name, source in DOCUMENTS.items():
+        if not source.exists():
+            raise SystemExit(
+                f"missing {source.relative_to(REPO)} -- it is the authored source of "
+                f"submission/{name}, kept in docs/ so the bundle stays generated."
+            )
+        (BUNDLE / name).write_text(
+            strip_repo_only(source.read_text(encoding="utf-8")), encoding="utf-8"
         )
-    (BUNDLE / "README.md").write_text(
-        strip_repo_only(REPORT.read_text(encoding="utf-8")), encoding="utf-8"
-    )
 
     files = sorted(p.relative_to(BUNDLE).as_posix() for p in BUNDLE.rglob("*") if p.is_file())
     print(f"built submission/ -- {len(files)} files")
@@ -256,12 +265,23 @@ def verify_static() -> bool:
     ]
     results.append(check("no API-key-shaped string anywhere", not secrets, ", ".join(secrets)))
 
-    expected = {"agent.py", "requirements.txt", "README.md"}
+    expected = {"agent.py", "requirements.txt", *DOCUMENTS}
     present = {p.name for p in BUNDLE.iterdir() if p.is_file()}
     results.append(check(
-        "required layout present (agent.py, requirements.txt, README.md, src/)",
+        "required layout present (agent.py, requirements.txt, README.md, REPORT.md, src/)",
         expected <= present and (BUNDLE / "src" / "agent.py").exists(),
         f"missing {sorted(expected - present)}",
+    ))
+
+    # The maintainer note in each source is fenced off; a leaked marker means the fence
+    # was edited into a shape `strip_repo_only` no longer matches.
+    leaked_fence = [
+        name for name in DOCUMENTS
+        if "build:strip" in (BUNDLE / name).read_text(encoding="utf-8")
+    ]
+    results.append(check(
+        "repo-only maintainer notes stripped from the bundled documents",
+        not leaked_fence, ", ".join(leaked_fence),
     ))
 
     return all(results)

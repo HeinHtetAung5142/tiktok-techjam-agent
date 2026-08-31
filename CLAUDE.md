@@ -195,12 +195,16 @@ evaluator is not editable, so `starter/` **cannot be renamed** into the layout
 `docs/submission_rules.md` recommends. `tools/build_submission.py` emits that layout instead
 — `submission/agent.py` + `src/` with imports rewritten, plus a four-line `starter/agent.py`
 shim so both import paths resolve to one implementation — and then re-runs all 200 sessions
-against the bundle, requiring byte-identical output. `docs/submission_report.md` is the
-authored report and becomes `submission/README.md` on build.
+against the bundle, requiring byte-identical output. The bundle's two documents are
+authored in `docs/` and copied in on build: `submission_setup.md` becomes its `README.md`
+(setup and run only) and `submission_report.md` becomes its `REPORT.md`. The split is what
+`docs/submission_rules.md` asks for -- setup instructions *and* a report *and* a
+latency/token/cost disclosure -- without burying the install steps under the method.
 
 ```text
 tools/build_submission.py  builds and verifies submission/
-docs/submission_report.md  the required report; the bundle's README
+docs/submission_setup.md   setup instructions; the bundle's README.md
+docs/submission_report.md  the required report; the bundle's REPORT.md
 submission/                GENERATED — rebuild it, never edit it
 ```
 
@@ -522,8 +526,8 @@ noise; say so rather than claiming a win.
 - **`submission/` is generated, never hand-edited.** `py tools/build_submission.py` rebuilds it
   from `starter/` and refuses to pass unless a full 200-session run against the bundle is
   byte-identical to `results/results_after_fieldfactors.json`. Change `starter/` or
-  `docs/submission_report.md`, then rebuild — an edit made directly in `submission/` is
-  destroyed by the next build.
+  `docs/submission_setup.md` / `docs/submission_report.md`, then rebuild — an edit made
+  directly in `submission/` is destroyed by the next build.
 - `graphify-out/` is gitignored; each clone builds its own graph.
 - Git hooks are **local to each clone**. Every teammate runs the setup below once after cloning.
 

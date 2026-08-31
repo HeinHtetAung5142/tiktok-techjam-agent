@@ -1,5 +1,11 @@
 # Shopping Copilot — setup and run
 
+<!-- build:strip-start -->
+> This file is the authored source of the bundle's `README.md`.
+> `tools/build_submission.py` copies it into `submission/` on every build — edit it here,
+> then rebuild. Do not edit `submission/README.md` directly; it is regenerated.
+<!-- build:strip-end -->
+
 A multi-turn conversational shopping agent that finds a hidden target product inside a
 50,000-item catalog. **It runs fully offline: no LLM call, no API key, no network access.**
 

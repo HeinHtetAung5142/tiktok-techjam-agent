@@ -194,8 +194,8 @@ Regenerates `submission/` from `starter/` — the entry file, `src/`, `requireme
 the report — and then **proves it is the agent we measured**: it re-runs all 200 sessions
 with the bundle ahead of the repo on `PYTHONPATH` and requires the result to be
 byte-identical to `results/results_after_fieldfactors.json`. The bundle is never
-hand-edited; to change it, change the source in `starter/` or `docs/submission_report.md`
-and rebuild.
+hand-edited; to change it, change the source in `starter/`, `docs/submission_setup.md` or
+`docs/submission_report.md` and rebuild.
 
 `starter/` cannot simply be renamed into the layout `docs/submission_rules.md` recommends,
 because `evaluator/local_evaluator.py:12` imports `starter.agent` and the evaluator is
@@ -352,8 +352,8 @@ Work was split along the four pillars of the problem statement.
 | Coordination & Evaluation | _TODO_ | Evaluator analysis, score ratchet and verification suites, feasibility measurement, documentation and reporting |
 
 > **Fill in the owner column before submitting.** The same table appears in
-> `docs/submission_report.md`, which is the version that ships inside the bundle — update
-> both, then re-run `py tools/build_submission.py`.
+> `docs/submission_report.md`, which becomes `submission/REPORT.md` — update both, then
+> re-run `py tools/build_submission.py`.
 
 ---
 
@@ -394,7 +394,8 @@ tools/sweep_constants.py    coordinate-descent sweep over the tuned constants
 tools/llm_smoke.py          checks a real API key end to end
 tools/benchmark_llms.py     compares candidate models on the free-form path
 
-docs/submission_report.md   the required report; becomes submission/README.md
+docs/submission_setup.md    setup instructions; becomes submission/README.md
+docs/submission_report.md   the required report; becomes submission/REPORT.md
 docs/features/              every feature 01–16, each with a measured score delta
 docs/LLM_SETUP.md           optional-model setup, per provider
 docs/demo-script.md         narration script for the demo video
