@@ -358,10 +358,10 @@ Work was split along the four pillars of the problem statement.
 
 | Pillar | Owner | Scope |
 |---|---|---|
-| Retrieval & Routing | _TODO_ | FTS5 index, dual-track routing, multi-route retrieval and RRF fusion, phrase routes, dense LSA route |
-| Dialog & Ranking | _TODO_ | Slot state and evidence accumulation, clarification policy, rank-vs-turn arbitrage, reranker and field-factor calibration |
-| Integration | _TODO_ | Agent contract wiring, optional model client and circuit breaker, offline fallback, local demo UI, submission packaging |
-| Coordination & Evaluation | _TODO_ | Evaluator analysis, score ratchet and verification suites, feasibility measurement, documentation and reporting |
+| Retrieval & Routing | HeinHtetAung5142, TheZincTZ | FTS5 index, dual-track routing, multi-route retrieval and RRF fusion, phrase routes, dense LSA route |
+| Dialog & Ranking | Caspian616, HeinHtetAung5142 | Slot state and evidence accumulation, clarification policy, rank-vs-turn arbitrage, reranker and field-factor calibration |
+| Integration | CatbotBox, Caspian616 | Agent contract wiring, optional model client and circuit breaker, offline fallback, local demo UI, submission packaging |
+| Coordination & Evaluation | HeinHtetAung5142, Caspian616, CatbotBox, TheZincTZ | Evaluator analysis, score ratchet and verification suites, feasibility measurement, documentation and reporting |
 
 > **Fill in the owner column before submitting.** The same table appears in
 > `docs/submission_report.md`, which becomes `submission/REPORT.md` — update both, then
