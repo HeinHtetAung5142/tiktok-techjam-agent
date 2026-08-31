@@ -77,7 +77,10 @@ exactly where `DISCLOSURE_SCHEDULE` widens 1 → 4 → 8.** Turns 1–2 disclose
 | 4 misses → found | +0.0100 (HitRate) + 0.0060 (MRR) |
 
 So the realistic ceiling with the current miss set is **~0.947**, against 0.912205 today, and the
-rank-2-to-8 pool is worth over 2x the entire miss pool. Chase that, not the misses.
+rank-2-to-8 pool is worth over 2x the entire miss pool. **That pool has now been chased, with the
+one mechanism anybody had for it, and it did not move** — see feature 17 and Known gap 1. The
+headroom is real; the route to it is not known. Treat ~0.947 as an upper bound nobody has a plan
+for, not as a target.
 
 **The 5 remaining misses are not a retrieval problem and cannot be fixed by a better retriever.**
 Their disclosed constraints are shared with thousands of products — `public_0087` discloses only
@@ -95,7 +98,7 @@ py tools/score_delta.py <before.json> <after.json>   # markdown delta table for 
 py tools/feasibility_report.py                       # latency / token / cost disclosure tables
 py tools/sweep_constants.py --list                   # show the tunable axes
 py tools/sweep_constants.py --axis A B                # coordinate-descent sweep over those axes
-py tools/verify_features.py                          # 90 feature/contract/isolation checks
+py tools/verify_features.py                          # 95 feature/contract/isolation checks
 py tools/verify_llm.py                               # 96 LLM/env/breaker checks; stubs HTTP, no key
 py tools/score_ratchet.py                            # REFUSES a change that lowers the score
 py tools/build_submission.py                         # rebuild submission/ + prove it byte-identical
@@ -116,9 +119,10 @@ guarded by `if x:`. `verify_features.py` asserts the 0-free-form-calls invariant
 that argument true as the regexes evolve rather than letting it decay into folklore.
 
 `verify_features.py` and `verify_llm.py` are the pre-submission gate: both exit non-zero on a
-regression, and neither needs network or credentials. Two robustness checks are reported as
-**XFAIL** rather than failures — they are known gap 4 below, a recorded decision rather than a
-regression.
+regression, and neither needs network or credentials. **There are no XFAILs left**: the two
+robustness checks that were reported as expected failures under known gap 4 became real passes in
+feature 17, and the "respond() before reset() raises RuntimeError" check was inverted rather than
+deleted, so the contract softening is recorded as a decision.
 
 **Use `sweep_constants.py`, not repeated evaluator runs, to tune a constant.** It builds one
 `Agent` and reuses it across every variant, so the ~13.5 s index construction is paid once instead
@@ -340,18 +344,27 @@ not survive that; modelling "ask a targeted question, absorb the answer into sta
 
 ## Known gaps (highest leverage first)
 
-1. **The only open lever: `_coverage` scores recall with no length normalization**
-   (`starter/ranking.py`). It sums `idf * field_factor` over matched terms and divides by
-   `total_mass`, which is constant across candidates — so it measures *how much of the customer's
-   evidence is in this product*, and never *how much of this product is the customer's evidence*.
-   A sprawling listing that happens to contain "100% Cotton" and "Button closure" among forty other
-   features scores identically to a focused listing where those are the whole product. That is
-   exactly the failure shape of the 34 rank-2-to-8 sessions. Adding a precision term (or
-   normalizing by document length) is principled and appears nowhere in features 04–07. **This is
-   the one idea with a real mechanism behind it that has not been tried** — see
-   `docs/features/09-optimization-headroom.md` for the full argument, the headroom arithmetic, and
-   what was already ruled out. Expect it to move a handful of sessions, not all 34; measure, don't
-   assume.
+1. **There is no open lever left. The last one was measured and rejected**
+   (`docs/features/17-coverage-precision-and-robustness.md`). `_coverage`
+   (`starter/ranking.py`) scores recall with no length normalization: it divides by `total_mass`,
+   which is constant across candidates, so it asks *how much of the customer's evidence is in this
+   product* and never the converse. That was listed here for several features as the one idea with
+   a real mechanism behind it that had not been tried, and the reasoning was sound about the
+   symptom and **wrong about the cause**. BM25 length normalization was implemented and swept:
+
+   | Direction | Result |
+   |---|---|
+   | penalise length (`b` 0.15 → 1.0) | **−0.036 → −0.325**, monotone, all three metrics at once |
+   | reward length (`b` −0.1 → −0.5) | **−0.020 → −0.245**, monotone |
+   | distinct-vocabulary length instead of raw | **−0.011 → −0.038** |
+
+   **`b = 0` is a strict local maximum in both directions under both definitions of length** —
+   nothing tested is inside the noise floor. Two reasons it had to fail: **length is positively
+   correlated with being a target** (the simulator generates every disclosure from the target's own
+   `features`/`details`, so a rich listing is both disclosable *and* long), and **precision is
+   already priced in twice**, by `_phrase_score` and by the `description` 0.65 / `store` 0.7 field
+   factors. Do not re-parameterize this — log damping is a gentler member of a family that is
+   already negative at its gentlest tested point. A new idea is needed, not another curve.
 2. **Four misses remain, and they are information-theoretically unreachable:** `public_0020`,
    `public_0087`, `public_0144`, `public_0174`. Their disclosed constraints don't discriminate at
    all. Verified in feature 06 — a conjunction route that narrowed the candidate set to 100 still
@@ -365,19 +378,26 @@ not survive that; modelling "ask a targeted question, absorb the answer into sta
 3. **The first two turns return a single recommendation** (feature 05). It never costs a find here
    and it is contract-legal, but it is thin UX and reads oddly in a live demo. Disclose it in the
    final report rather than letting a judge find it.
-4. **`respond()` has no broad exception guard.** The `try` at `starter/agent.py:112-117` is
-   `try/finally` for latency timing only — it re-raises. Fault isolation exists at inner layers
-   (reranker, dense route, phrase routes) but **an exception in `DialogState.observe` or in
-   retrieval routes 1–2 escapes `respond()` entirely**, and a raised exception is scored as a miss.
-   Confirmed by direct execution: `observe(None, 1)` raises `TypeError` at
-   `starter/dialog_state.py:104`; a non-`int` `turn` raises at `starter/agent.py:49-50`; and
-   `respond()` before `reset()` raises `RuntimeError` by design (`starter/agent.py:109-110`).
-   The public set never triggers any of these, and the organizer's evaluator catches exceptions
-   anyway (`evaluator/local_evaluator.py:239-244`) — so this is **insurance against a stricter
-   hidden harness, not a known loss.** Fix shape if taken: wrap `_respond` in a broad
-   `except Exception` returning a valid-shaped fallback, coerce `user_message = str(... or "")` and
-   `turn = int(turn)`, and auto-create the session instead of raising. Requires a full re-run
-   confirming 0.912205 is unchanged. Recorded so it is a decision, not a discovery.
+4. **Closed (feature 17): `respond()` now has a broad exception guard.** It was `try/finally` for
+   latency timing only and re-raised, so an exception in `DialogState.observe` or in retrieval
+   routes 1–2 escaped, and a raised exception is scored as a miss
+   (`evaluator/local_evaluator.py:239-244`). Now inputs are coerced (`user_message` to `str` with
+   the falsy case going to `""` first, so `None` cannot become the query term "none"; `turn` to
+   `int`, default 1), an unknown `session_id` auto-creates its session rather than raising, and a
+   broad `except Exception` returns `_fallback_response()` — contract-valid, `ask_attribute="other"`
+   (never `null`, which wastes the turn outright), empty recommendations. It is the **outermost**
+   layer only; the inner fault isolation still keeps the turn *working*, and this only stops what
+   escapes it from becoming a miss.
+
+   Banked in the same feature: `_capped_terms` reserves `QUERY_TERM_HEAD = 16` and drops the
+   *middle* of an over-long query rather than the newest terms. Feature 09's proposal to take the
+   tail instead would have inverted the bug — dropping the turn-1 category, which is the reason
+   evidence accumulates at all.
+
+   Both are **byte-identical** to `results/results_after_fieldfactors.json`, ratchet reports
+   `PASS: byte-identical`, and `verify_features.py` went 90 checks with 2 XFAILs → **95 with none**.
+   Neither buys a public-set point; both remove a private-set failure mode on a set 4x larger with
+   paraphrasing the spec permits.
 
 *Demoted (do not re-attempt without new evidence):* **`user_profile` carries no retrieval signal.**
 `reset()` discards it (`starter/agent.py:98-100`; the "may be used for personalization" comment
@@ -426,7 +446,8 @@ to happen on the private set.
 
 **The 4 remaining non-rank-1 override sessions are not an override problem.** They sit at ranks
 2/2/7/4, and `public_0103` never leaves rank 4 on any turn, before or after the override. They are
-gap 1 (coverage precision). `intent_override` is 29/30 with 25 at rank 1 and MTTC 3.69 against a
+the same residual as the other rank-2-to-8 sessions — which feature 17 has now shown is *not* a
+coverage-precision problem either. `intent_override` is 29/30 with 25 at rank 1 and MTTC 3.69 against a
 structural floor of 3.60 — there is 0.09 of a turn left in the whole scenario.
 
 *Removed:* "turns are wasted once evidence runs dry" was listed here for three features and was
@@ -441,7 +462,7 @@ Cut from the bottom up. Never let a Tier 3 idea pull someone off Tier 1 work.
 |---|---|---|
 | 0 | prerequisite | agent contract wired end-to-end; evaluator reproduces a score |
 | 1 | HitRate@10 (50%) | dual-track routing ✅ · multi-route retrieval ✅ · slot memory ✅ · clarification trigger ✅ |
-| 2 | MRR (30%) | semantic reranking ✅ · rank-vs-turn arbitrage ✅ · hybrid/dense retrieval ✅ (route only, flat) · intent override ✅ (feature 12 — closed: slots cleared, retraction measured and rejected, 29/30 at MTTC 3.69 vs floor 3.60) · personalization ❌ (measured: profile is degenerate, no retrieval signal — see Known gaps) · **coverage precision term ⏳ (untested — the only open lever, see feature 09)** |
+| 2 | MRR (30%) | semantic reranking ✅ · rank-vs-turn arbitrage ✅ · hybrid/dense retrieval ✅ (route only, flat) · intent override ✅ (feature 12 — closed: slots cleared, retraction measured and rejected, 29/30 at MTTC 3.69 vs floor 3.60) · personalization ❌ (measured: profile is degenerate, no retrieval signal — see Known gaps) · coverage precision term ❌ (feature 17 — measured and rejected: b=0 is a strict two-sided optimum, −0.036 to −0.325 penalising length, −0.020 to −0.245 rewarding it) |
 | 3 | Efficiency (20%) + feasibility | latency & token logging ✅ (feature 08) · offline fallback ✅ (feature 13 — no longer vacuous: there is now an online path, and a full run with it configured *and* the network dead is byte-identical) · optional SiliconFlow Qwen3-8B ✅ (feature 13 — off by default; `expand` mode unmeasured against the live model) · boundary handling ✅ (`DECLINE_RE` vs `EXHAUSTED_RE`, `starter/dialog_state.py:56-59`) · free-form input robustness ✅ (features 11 + 15 — WebUI/demo only, both verified score-neutral byte-for-byte; 15 adds negation-as-exclusion and stops re-asking a filled slot) |
 
 Four roles, split by problem-statement pillar — Retrieval & Routing, Dialog + Ranking, Integration,

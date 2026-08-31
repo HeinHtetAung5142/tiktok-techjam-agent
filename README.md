@@ -173,12 +173,13 @@ fell, and distinguishes *byte-identical* (the sessions array matches exactly) fr
 ### The full test suite
 
 ```bash
-py tools/verify_features.py   # 90 feature / contract / isolation checks
+py tools/verify_features.py   # 95 feature / contract / isolation checks
 py tools/verify_llm.py        # 96 optional-model checks; stubs HTTP, needs no key
 ```
 
-Both exit non-zero on a regression and need neither network nor credentials. Two
-robustness checks report as **XFAIL** — documented known gaps (see §4), not regressions.
+Both exit non-zero on a regression and need neither network nor credentials, and **there
+are no XFAILs left** — the two robustness checks that were expected failures under known
+gap 4 became real passes in feature 17.
 
 `verify_features.py` includes the invariant the whole design rests on: it asserts that a
 full scored run makes **566 `observe()` calls and 0 `_observe_freeform` calls**, proving
@@ -266,22 +267,33 @@ them. We verified this rather than assuming it: a conjunction route narrowing to
 candidates still could not order them, and `public_0020` moves from rank 15 to 14 when the
 hard filter is removed entirely. **A better retriever cannot fix these.**
 
-**The real headroom is ranking precision, and we did not get to it.** Of 196 hits, 162 land
-at rank 1 and **34 land at ranks 2–10** — 30 of those on turns 3–4, exactly where the
-disclosure schedule widens 1 → 4 → 8. Promoting all 34 to rank 1 is worth **+0.0348**,
-more than three times the entire miss pool (+0.0160). The diagnosed cause is real and
-untried: `Reranker._coverage` measures recall with **no length normalization**. It asks
-*how much of the customer's evidence is in this product* and never *how much of this
-product is the customer's evidence*, so a sprawling 700-token listing that happens to
-contain "100% Cotton" among forty other features scores identically to a focused listing
-where those are the whole product. **Adding a precision term is the single highest-value
-thing left**, and the realistic ceiling with the current miss set is ~0.947.
+**The real headroom is ranking precision, and our one hypothesis for it was wrong.** Of 196
+hits, 162 land at rank 1 and **34 land at ranks 2–10** — 30 of those on turns 3–4, exactly
+where the disclosure schedule widens 1 → 4 → 8. Promoting all 34 to rank 1 is worth
+**+0.0348**, more than three times the entire miss pool (+0.0160). The diagnosed cause
+looked solid: `Reranker._coverage` measures recall with **no length normalization**, so a
+sprawling listing that happens to contain "100% Cotton" among forty other features scores
+identically to a focused listing where those are the whole product.
 
-**`respond()` has no broad exception guard.** `observe(None, 1)` raises `TypeError`, and a
-non-`int` `turn` raises too. The public set never triggers either and the organizer's
-evaluator catches exceptions anyway — so this is insurance against a stricter hidden
-harness, not a known loss. It is recorded as a decision, not a discovery, and reported as
-XFAIL by the test suite.
+Feature 17 implemented BM25 length normalization and swept it. Penalising length costs
+**−0.036 at b=0.15 and −0.325 at b=1.0**, monotonically, on all three metrics at once;
+*rewarding* length costs −0.020 to −0.245; normalizing by distinct vocabulary instead of raw
+token count costs −0.011 to −0.038. **`b = 0` is a strict local maximum in both directions
+under both definitions of length.** Length turns out to be *positively* correlated with
+being a target — the simulator generates every disclosure from the target's own
+`features`/`details`, so a rich listing is both disclosable and long — and precision is
+already priced in twice, by the phrase term and by the field factors that discount
+`description` and `store`.
+
+So the ~0.947 ceiling is real arithmetic with **no known route to it**. We report it as an
+upper bound nobody has a plan for, not as work we ran out of time for.
+
+**`respond()` cannot raise** (closed in feature 17). It used to: `observe(None, 1)` raised
+`TypeError` and a non-`int` `turn` raised too, and a raised exception is scored as a miss.
+It is now wrapped in a broad guard that coerces inputs, auto-creates an unknown session, and
+falls back to a contract-valid payload. The public set never triggered any of it, so this
+bought **zero public-set points** — it is insurance against a stricter hidden harness, and
+the change is byte-identical rather than merely score-equal.
 
 **Turns 1–2 return a single recommendation.** Deliberate and contract-legal (it buys rank,
 see above), but it is thin UX and reads oddly in a live demo.
@@ -386,7 +398,7 @@ requirements.txt            pinned dependencies — install before running
 
 tools/build_submission.py   builds submission/ and proves it byte-identical
 tools/score_ratchet.py      refuses a change that lowers the score
-tools/verify_features.py    90 feature / contract / isolation checks
+tools/verify_features.py    95 feature / contract / isolation checks
 tools/verify_llm.py         96 optional-model checks; stubs HTTP, needs no key
 tools/feasibility_report.py regenerates the latency / token / cost tables
 tools/score_delta.py        markdown before/after delta table for a feature doc

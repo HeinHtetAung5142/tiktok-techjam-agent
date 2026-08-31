@@ -161,21 +161,41 @@ hard filter is removed entirely. **A better retriever cannot fix these.**
 on turn 5** — one position from being a miss again. We report the number honestly rather
 than treating it as robust.
 
-**The real headroom is ranking precision, and we did not get to it.** Of 196 hits, 162 land
-at rank 1 and 34 land below it, most on turns 3–4 where the disclosure schedule widens.
-Promoting all 34 to rank 1 would be worth **+0.0348**, more than twice the entire miss pool.
-The diagnosed cause is real and untried: `Reranker._coverage` measures recall with **no
-length normalization**. It asks *how much of the customer's evidence is in this product* and
-never *how much of this product is the customer's evidence*, so a sprawling listing that
-happens to contain "100% Cotton" among forty other features scores identically to a focused
-listing where those are the whole product. Adding a precision term is the single
-highest-value thing left; the realistic ceiling with the current miss set is ~0.947.
+**The real headroom is ranking precision, and we now know our one hypothesis for it was
+wrong.** Of 196 hits, 162 land at rank 1 and 34 land below it, most on turns 3–4 where the
+disclosure schedule widens. Promoting all 34 to rank 1 would be worth **+0.0348**, more than
+twice the entire miss pool. The diagnosed cause looked solid: `Reranker._coverage` measures
+recall with **no length normalization**, so a sprawling listing that happens to contain
+"100% Cotton" among forty other features scores identically to a focused listing where those
+are the whole product. Catalog lengths span 39 tokens at p10 to 244 at p90, so there was
+room for it to matter.
 
-**`respond()` has no broad exception guard.** `observe(None, 1)` raises `TypeError`, and a
-non-`int` `turn` raises too. The public set never triggers either and the organizer's
-evaluator catches exceptions anyway — so this is insurance against a stricter hidden
-harness, not a known loss. It is recorded as a decision, not a discovery, and our test
-suite reports it as XFAIL rather than quietly passing.
+We implemented BM25 length normalization and swept it in both directions:
+
+| Direction | Result |
+|---|---|
+| penalise length (`b` 0.15 → 1.0) | **−0.036 → −0.325**, monotone, all three metrics at once |
+| reward length (`b` −0.1 → −0.5) | **−0.020 → −0.245**, monotone |
+| distinct-vocabulary length instead of raw | **−0.011 → −0.038** |
+
+`b = 0` — the shipped absence of any normalization — is a **strict local maximum in both
+directions under both definitions of length**. Nothing tested came within the noise floor.
+In hindsight there are two reasons it had to fail: length is *positively* correlated with
+being a target, because the simulator generates every disclosure from the target's own
+`features`/`details`, so a rich listing is both disclosable and long; and precision is
+already priced in twice, by the phrase term and by the field factors that discount
+`description` and `store`. We reverted it and kept the measurement.
+
+So the ~0.947 ceiling is real arithmetic, but **nobody has a route to it**. We report it as
+an upper bound with no plan attached rather than as work we ran out of time for.
+
+**`respond()` cannot raise.** It used to: `observe(None, 1)` raised `TypeError` and a
+non-`int` `turn` raised too, and a raised exception is scored as a miss. It is now wrapped
+in a broad guard that coerces inputs, auto-creates an unknown session, and falls back to a
+contract-valid payload asking about `other`. The public set never triggers any of it, so
+this buys **zero public-set points** — it is insurance against a stricter hidden harness,
+and we verified the change is byte-identical rather than merely score-equal. The two checks
+that used to be reported as XFAIL are now real passes; the suite has none left.
 
 **Turns 1–2 return a single recommendation.** Deliberate and contract-legal — it buys rank,
 per the arbitrage above — but it is thin UX and reads oddly in a live demo.
@@ -203,6 +223,9 @@ Recording these matters as much as the wins:
   "abandoned" attribute is generated from the target's own intent card, so it still
   describes the product we are hunting. Clearing the slots and letting the new message
   refill them is correct; deleting the old evidence is not.
+- **Coverage length normalization was our last idea and it was wrong in both directions**
+  (see above). We record it in full because the reasoning that motivated it was sound and
+  the next person to read `_coverage` will have the same idea.
 
 ---
 
