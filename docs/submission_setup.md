@@ -200,6 +200,45 @@ for rank").
 | `RuntimeError: reset must be called before respond` | `reset(session_id, ...)` must precede `respond(session_id, ...)` for every session id. |
 | The first call takes ~20–30 s | Expected, not a hang. The FTS5 index over 50,000 products and the LSA embeddings are built once at construction, then reused for every session and turn. |
 
+<!-- build:strip-start -->
+## Replicating the judged run (maintainers only)
+
+This section is stripped from the bundle's `README.md` — it is about the development repo,
+not about the submission.
+
+`py tools/build_submission.py` runs the evaluator from the **repo root** with
+`PYTHONPATH=submission;repo`. That proves the `starter/` shim re-exports the right class,
+but the whole development tree is still importable, so it cannot prove the bundle stands
+alone. To reproduce what a judge's machine actually does:
+
+```bash
+py tools/verify_clean_room.py          # stage + probe + 200 sessions, ~40 s
+py tools/verify_clean_room.py --keep   # ...and leave .cleanroom/ behind to inspect
+py tools/verify_clean_room.py --venv   # ...into a fresh venv from requirements.txt (~2 min)
+```
+
+It stages the layout below in `.cleanroom/` (gitignored; inside the repo so the 58 MB
+catalog is hardlinked, not copied), runs from **inside** it with `PYTHONPATH` scrubbed, and
+fails if any repo directory reaches `sys.path`, if any `src.*` module resolves outside the
+staged tree, if `[dense_retrieval] disabled` appears on stderr, or if the result is not
+byte-identical to `results/results_after_fieldfactors.json`.
+
+```text
+.cleanroom/
+  agent.py  src/  starter/  requirements.txt  README.md  REPORT.md   <- submission/
+  evaluator/                                                         <- a copy
+  data/catalog.jsonl  data/public_set.jsonl                          <- hardlinks
+```
+
+**Run `--venv` before submitting.** The default arm is satisfied by whatever is already
+installed on the dev machine, which is exactly what the organizer does not have; only the
+venv arm tests `requirements.txt` itself.
+
+Note that `from submission.agent import Agent` fails by design — see the troubleshooting
+row above. Do not "fix" it in the evaluator: `evaluator/` is organizer-owned and editing it
+invalidates the run.
+<!-- build:strip-end -->
+
 ## What this bundle contains
 
 ```text

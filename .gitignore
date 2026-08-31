@@ -16,3 +16,6 @@ graphify-out/
 # Claude Code local config (graphify hook paths are machine-specific;
 # each teammate runs `graphify claude install` -- see CLAUDE.md)
 .claude/
+
+# clean-room staging (tools/verify_clean_room.py); rebuilt on every run
+.cleanroom/

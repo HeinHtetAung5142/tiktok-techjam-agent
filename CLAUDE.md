@@ -102,6 +102,8 @@ py tools/verify_features.py                          # 95 feature/contract/isola
 py tools/verify_llm.py                               # 96 LLM/env/breaker checks; stubs HTTP, no key
 py tools/score_ratchet.py                            # REFUSES a change that lowers the score
 py tools/build_submission.py                         # rebuild submission/ + prove it byte-identical
+py tools/verify_clean_room.py                        # run the bundle alone, as the organizer will
+py tools/verify_clean_room.py --venv                 # ...into a fresh venv; run before submitting
 py tools/llm_smoke.py                                # check a real SiliconFlow key end-to-end
 py tools/benchmark_llms.py --offline                 # compare models; --offline uses stubs
 py tools/benchmark_llms.py --models A,B --sessions 50  # ...and score them against a control arm
@@ -205,11 +207,33 @@ authored in `docs/` and copied in on build: `submission_setup.md` becomes its `R
 `docs/submission_rules.md` asks for -- setup instructions *and* a report *and* a
 latency/token/cost disclosure -- without burying the install steps under the method.
 
+**Two different verifications, and they prove different things.** `build_submission.py` re-runs the
+200 sessions from the **repo root** with `PYTHONPATH=submission;repo`, which proves the `starter/`
+shim re-exports the right class — but leaves the whole development tree on `sys.path`, so it cannot
+tell you the bundle stands alone. `tools/verify_clean_room.py` stages the layout
+`docs/submission_rules.md` actually describes (bundle contents at the root, a copy of `evaluator/`
+and `data/` beside them), runs from **inside** it with `PYTHONPATH` scrubbed, and asserts that no
+repo directory is on `sys.path` and no `src.*` module resolved outside the staged tree. Both are
+required to be byte-identical to `results/results_after_fieldfactors.json`. Staging is
+`.cleanroom/` (gitignored, inside the repo so the 58 MB catalog can be hardlinked rather than
+copied); `--keep` leaves it for inspection, `--venv` builds a fresh venv from `requirements.txt`
+first, which is the only arm that actually tests the dependency manifest rather than the dev
+machine's site-packages.
+
+Both negative controls were run and fire correctly: removing `submission/src/dense_retrieval.py`
+gives `FAIL` on the dense check plus 0.909858 vs 0.912205 across 8 sessions, and forcing the repo
+onto `sys.path` trips the leak detector.
+
+**`from submission.agent import Agent` does not work, and must not be made to.** It makes the repo
+root the import root, so `src` is no longer top-level — `No module named 'src'`. The bundle's own
+directory is the import root by design; that is the layout the rules asked for.
+
 ```text
-tools/build_submission.py  builds and verifies submission/
-docs/submission_setup.md   setup instructions; the bundle's README.md
-docs/submission_report.md  the required report; the bundle's REPORT.md
-submission/                GENERATED — rebuild it, never edit it
+tools/build_submission.py   builds and verifies submission/
+tools/verify_clean_room.py  runs the bundle standalone, as a judge will
+docs/submission_setup.md    setup instructions; the bundle's README.md
+docs/submission_report.md   the required report; the bundle's REPORT.md
+submission/                 GENERATED — rebuild it, never edit it
 ```
 
 - **Index.** `_build_index` loads all 50k products into an in-memory SQLite **FTS5** table at
