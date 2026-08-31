@@ -75,7 +75,7 @@ plateau from 60 up, with a real falloff past 200.
 
 ## Measured impact
 
-_results_after_clarification.json → results_after_reranking.json_
+_results/results_after_clarification.json → results/results_after_reranking.json_
 
 | Metric | Before | After | Delta |
 |---|---|---|---|

@@ -89,7 +89,7 @@ the argmax, so principle and measurement agree here rather than having to be tra
 
 ## Measured impact
 
-_results_after_reranking.json → results_after_disclosure.json_
+_results/results_after_reranking.json → results/results_after_disclosure.json_
 
 | Metric | Before | After | Delta |
 |---|---|---|---|

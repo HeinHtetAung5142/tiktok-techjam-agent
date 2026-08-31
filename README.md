@@ -156,7 +156,7 @@ aggregate plus the per-scenario breakdown. Expect:
 **Runs are deterministic.** `materialize_hidden_fields` regenerates intent cards with a
 seeded RNG, so identical code always scores identically, bit for bit. A changed score means
 a changed agent — never run-to-run noise. The committed snapshot of this exact run is
-`results_after_fieldfactors.json`.
+`results/results_after_fieldfactors.json`.
 
 ### Verifying you reproduced it exactly
 
@@ -183,6 +183,24 @@ robustness checks report as **XFAIL** — documented known gaps (see §4), not r
 `verify_features.py` includes the invariant the whole design rests on: it asserts that a
 full scored run makes **566 `observe()` calls and 0 `_observe_freeform` calls**, proving
 the human-input code paths are unreachable while scoring.
+
+### Building the submission bundle
+
+```bash
+py tools/build_submission.py
+```
+
+Regenerates `submission/` from `starter/` — the entry file, `src/`, `requirements.txt` and
+the report — and then **proves it is the agent we measured**: it re-runs all 200 sessions
+with the bundle ahead of the repo on `PYTHONPATH` and requires the result to be
+byte-identical to `results/results_after_fieldfactors.json`. The bundle is never
+hand-edited; to change it, change the source in `starter/` or `docs/submission_report.md`
+and rebuild.
+
+`starter/` cannot simply be renamed into the layout `docs/submission_rules.md` recommends,
+because `evaluator/local_evaluator.py:12` imports `starter.agent` and the evaluator is
+organizer-owned. The bundle carries a four-line `starter/agent.py` shim so both import
+paths resolve to the one implementation in `src/`.
 
 ### Other useful commands
 
@@ -230,7 +248,7 @@ closed to `off`. No key is in the repo; configuration is environment-only.
 
 Because official judging may disable the network, the fallback was **measured, not
 asserted**: a full run with the model configured *and every socket raising* produces a
-results document byte-identical to `results_after_fieldfactors.json`. Setup:
+results document byte-identical to `results/results_after_fieldfactors.json`. Setup:
 `docs/LLM_SETUP.md`. Rationale and measurements: `docs/features/13-optional-llm.md`.
 
 ---
@@ -322,6 +340,23 @@ across 16 features. `tools/score_ratchet.py` now enforces it mechanically.
 
 ---
 
+## 5. Team and contributions
+
+Work was split along the four pillars of the problem statement.
+
+| Pillar | Owner | Scope |
+|---|---|---|
+| Retrieval & Routing | _TODO_ | FTS5 index, dual-track routing, multi-route retrieval and RRF fusion, phrase routes, dense LSA route |
+| Dialog & Ranking | _TODO_ | Slot state and evidence accumulation, clarification policy, rank-vs-turn arbitrage, reranker and field-factor calibration |
+| Integration | _TODO_ | Agent contract wiring, optional model client and circuit breaker, offline fallback, local demo UI, submission packaging |
+| Coordination & Evaluation | _TODO_ | Evaluator analysis, score ratchet and verification suites, feasibility measurement, documentation and reporting |
+
+> **Fill in the owner column before submitting.** The same table appears in
+> `docs/submission_report.md`, which is the version that ships inside the bundle — update
+> both, then re-run `py tools/build_submission.py`.
+
+---
+
 ## Agent interface
 
 ```python
@@ -345,9 +380,11 @@ only the first 10 valid, unique, in-catalog ids are scored. See
 ## Repository layout
 
 ```text
-starter/                    the submitted agent (see §1)
+starter/                    the agent (see §1) — the source of truth for the bundle
+submission/                 GENERATED submission bundle; rebuild, never hand-edit
 requirements.txt            pinned dependencies — install before running
 
+tools/build_submission.py   builds submission/ and proves it byte-identical
 tools/score_ratchet.py      refuses a change that lowers the score
 tools/verify_features.py    90 feature / contract / isolation checks
 tools/verify_llm.py         96 optional-model checks; stubs HTTP, needs no key
@@ -357,11 +394,11 @@ tools/sweep_constants.py    coordinate-descent sweep over the tuned constants
 tools/llm_smoke.py          checks a real API key end to end
 tools/benchmark_llms.py     compares candidate models on the free-form path
 
-docs/features/              every feature, each with a measured score delta (01–13, 15, 16;
-                            14 is the model circuit breaker, written up in CLAUDE.md)
+docs/submission_report.md   the required report; becomes submission/README.md
+docs/features/              every feature 01–16, each with a measured score delta
 docs/LLM_SETUP.md           optional-model setup, per provider
 docs/demo-script.md         narration script for the demo video
-results_after_*.json        committed milestone snapshots
+results/                    committed milestone snapshots (results_after_*.json)
 
 webui/                      optional local UI for hand-driven sessions; stdlib only,
                             adds no dependency, delete the directory to remove it

@@ -6,7 +6,7 @@
 **Tier:** 1
 
 > Backfilled from git history after the fact. The measured impact below is real — recovered by
-> restoring the `results_after_routing.json` snapshot the commit originally shipped.
+> restoring the `results/results_after_routing.json` snapshot the commit originally shipped.
 
 ## What & why
 
@@ -40,7 +40,7 @@ diagnostic than its marketing copy.
 
 ## Measured impact
 
-_baseline_results.json → results_after_routing.json_
+_baseline_results.json → results/results_after_routing.json_
 
 | Metric | Before | After | Delta |
 |---|---|---|---|

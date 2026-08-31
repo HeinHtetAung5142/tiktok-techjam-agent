@@ -17,7 +17,7 @@ It reports two different things, and the distinction matters:
   sessions moved. That is *not* a no-op: offsetting movements can hide a real regression
   that the private set, four times larger, would not forgive. Treated as a warning.
 
-The reference is `results_after_fieldfactors.json`, the committed score of record.
+The reference is `results/results_after_fieldfactors.json`, the committed score of record.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-REFERENCE = REPO / "results_after_fieldfactors.json"
+REFERENCE = REPO / "results" / "results_after_fieldfactors.json"
 
 # The score of record. Raise it only through --update, and only with a feature doc
 # explaining the movement.

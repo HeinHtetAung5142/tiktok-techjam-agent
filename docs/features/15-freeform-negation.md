@@ -71,7 +71,7 @@ retirement, and `demote_terms` losing nothing.
 
 ## Measured impact
 
-_results_after_fieldfactors.json → results_negation_check.json_
+_results/results_after_fieldfactors.json → results_negation_check.json_
 
 | Metric | Before | After | Delta |
 |---|---|---|---|
@@ -99,7 +99,7 @@ _results_after_fieldfactors.json → results_negation_check.json_
 |  |  | MTTC | 3.93333 | 3.93333 | 0 |
 
 **Not merely flat — byte-identical.** The output file is identical to
-`results_after_fieldfactors.json` at 38,523 bytes, sessions array included, which is the same
+`results/results_after_fieldfactors.json` at 38,523 bytes, sessions array included, which is the same
 standard features 11–13 were held to. `verify_features.py` 67/69 (the two XFAILs are known gap 4),
 `verify_llm.py` 96/96.
 

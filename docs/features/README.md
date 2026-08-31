@@ -12,8 +12,8 @@ last morning.
 A feature is not done until the evaluator has been re-run and the score movement written down.
 
 ```bash
-py -m evaluator.local_evaluator --output results_after_<milestone>.json
-py tools/score_delta.py <previous>.json results_after_<milestone>.json
+py -m evaluator.local_evaluator --output results/results_after_<milestone>.json
+py tools/score_delta.py <previous>.json results/results_after_<milestone>.json
 ```
 
 Paste the generated table into your feature doc, then commit the code and the results snapshot
@@ -76,6 +76,6 @@ What it does not fix, what it made worse, and what should come next.
 | 11 | [Free-form input robustness](11-freeform-input-robustness.md) | 3 | 0.912205 (byte-identical) |
 | 12 | [Intent override, properly](12-intent-override.md) | 2 | 0.912205 (byte-identical) |
 | 13 | [Optional language model](13-optional-llm.md) | 3 | 0.912205 (byte-identical; off by default) |
-| 14 | _model circuit breaker_ — no doc file; written up in CLAUDE.md's Model policy | 3 | 0.912205 (byte-identical) |
+| 14 | [Model circuit breaker](14-llm-circuit-breaker.md) | 3 | 0.912205 (byte-identical) |
 | 15 | [Free-form negation and slot-aware questioning](15-freeform-negation.md) | 3 | 0.912205 (byte-identical) |
 | 16 | [Generic attribute facets + score ratchet](16-generic-facets.md) | 3 | 0.912205 (byte-identical) |

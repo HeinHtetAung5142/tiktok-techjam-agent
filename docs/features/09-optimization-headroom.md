@@ -195,7 +195,7 @@ The shipped weights sit below that cliff on every axis.
 | dense=0.5 | 0.903374 | −0.0034 | 0.9700 | 0.856579 |
 
 **Note the top row.** Turning the dense route off scores 0.907281 — which is exactly
-`results_after_phrase.json`, the repo's high-water mark. This independently reproduces feature 07's
+`results/results_after_phrase.json`, the repo's high-water mark. This independently reproduces feature 07's
 own measurement: the dense route costs **−0.00049** on the public set and was shipped anyway, as
 paraphrase insurance for the private set that 200 public sessions cannot measure. That trade is
 still the right call, but it is now confirmed from a second direction rather than resting on one

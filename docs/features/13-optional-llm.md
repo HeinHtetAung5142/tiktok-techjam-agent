@@ -243,7 +243,7 @@ record:
 | **TechnicalScore** | **0.912205** | **0.912205** | **0** |
 
 All four scenarios are 0 on every metric. The comparison is stronger than the table shows:
-the **entire results JSON is byte-identical** to `results_after_fieldfactors.json`, sessions
+the **entire results JSON is byte-identical** to `results/results_after_fieldfactors.json`, sessions
 array included — not merely score-identical. That still holds with a `.env` sitting in the
 repo root, because the evaluator reads `os.environ` directly.
 

@@ -57,7 +57,7 @@ catalog entry. Getting the customer to speak is effectively getting them to quot
 
 ## Measured impact
 
-_results_after_multiroute.json → results_after_clarification.json_
+_results/results_after_multiroute.json → results/results_after_clarification.json_
 
 | Metric | Before | After | Delta |
 |---|---|---|---|

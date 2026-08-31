@@ -63,7 +63,7 @@ the target outright; it is not a guarantee of no effect. On this set it has none
 
 ## Measured impact
 
-All four variants were run against `results_after_fieldfactors.json` (TechnicalScore 0.912205).
+All four variants were run against `results/results_after_fieldfactors.json` (TechnicalScore 0.912205).
 
 | Variant | What it does | Result |
 |---|---|---|

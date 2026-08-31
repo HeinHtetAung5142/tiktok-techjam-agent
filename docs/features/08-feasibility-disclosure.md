@@ -55,7 +55,7 @@ anyone later adds a model call, the "$0.00" claim fails loudly instead of going 
 inside the scoring loop is the `try/finally` wrapper and swapping an inline dict for
 `dict(NO_MODEL_USAGE)`.
 
-_results_after_dense.json → results.json_
+_results/results_after_dense.json → results.json_
 
 | Metric | Before | After | Delta |
 |---|---|---|---|
@@ -82,10 +82,10 @@ _results_after_dense.json → results.json_
 |  |  | MRR | 0.850595 | 0.850595 | 0 |
 |  |  | MTTC | 3.9 | 3.9 | 0 |
 
-**Deliberate deviation from the definition of done: no `results_after_*.json` snapshot was committed
-for this feature.** The post-change run is byte-identical to `results_after_dense.json`, so a
+**Deliberate deviation from the definition of done: no `results/results_after_*.json` snapshot was committed
+for this feature.** The post-change run is byte-identical to `results/results_after_dense.json`, so a
 snapshot would be a duplicate file with a different name — misleading, since it would imply an
-independent measurement. `results_after_dense.json` remains the snapshot of record. Naming this here
+independent measurement. `results/results_after_dense.json` remains the snapshot of record. Naming this here
 rather than leaving a reader to notice a missing file.
 
 ### Measured latency

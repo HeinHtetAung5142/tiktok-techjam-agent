@@ -92,7 +92,7 @@ agree before anything surfaces.
 
 ## Measured impact
 
-_results_after_disclosure.json → results_after_phrase.json_
+_results/results_after_disclosure.json → results/results_after_phrase.json_
 
 | Metric | Before | After | Delta |
 |---|---|---|---|

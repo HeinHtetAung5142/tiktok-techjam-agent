@@ -6,7 +6,7 @@
 **Tier:** 1
 
 > Backfilled from git history after the fact. Measured against the restored
-> `results_after_routing.json` snapshot, so this table isolates *this* feature rather than showing
+> `results/results_after_routing.json` snapshot, so this table isolates *this* feature rather than showing
 > the cumulative delta from the starter baseline.
 
 ## What & why
@@ -49,7 +49,7 @@ share it across both routes.
 
 ## Measured impact
 
-_results_after_routing.json → results_after_multiroute.json_
+_results/results_after_routing.json → results/results_after_multiroute.json_
 
 | Metric | Before | After | Delta |
 |---|---|---|---|

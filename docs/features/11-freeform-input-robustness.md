@@ -98,7 +98,7 @@ Unlike Part A this **does** run on the scored path, so it was measured and gated
 
 **Part A — required to be byte-identical, and is.**
 
-A full 200-session run with Part A in place reproduces `results_after_fieldfactors.json`
+A full 200-session run with Part A in place reproduces `results/results_after_fieldfactors.json`
 **byte for byte** (`diff -q`, not merely an equal TechnicalScore). Runs are deterministic
 (`materialize_hidden_fields` uses a seeded RNG), so this is a proof that the free-form branch never
 executes during scoring, not a "small enough" delta.
@@ -106,7 +106,7 @@ executes during scoring, not a "small enough" delta.
 **Part B — flat, on every metric and every scenario.**
 
 ```
-_results_after_fieldfactors.json → results_after_override.json_
+_results/results_after_fieldfactors.json → results/results_after_override.json_
 
 | Metric | Before | After | Delta |
 |---|---|---|---|
@@ -134,7 +134,7 @@ _results_after_fieldfactors.json → results_after_override.json_
 |  |  | MTTC | 3.93333 | 3.93333 | 0 |
 ```
 
-That run is also byte-identical to `results_after_fieldfactors.json` — a **zero** delta, not a small
+That run is also byte-identical to `results/results_after_fieldfactors.json` — a **zero** delta, not a small
 one. It confirms the measurement already in CLAUDE.md's demoted note: the slot drop fires in 3 of 200
 sessions and is benign in all three, and the phrase and dense routes deliberately bypass the `AND`
 filter anyway, so clearing it changes no ordering the public set can see. Part B is therefore
@@ -142,12 +142,12 @@ filter anyway, so clearing it changes no ordering the public set can see. Part B
 `>= 0.912205`, `intent_override >= 0.9667`) is met exactly, with both unchanged.
 
 No new results snapshot is committed: both runs reproduce the existing
-`results_after_fieldfactors.json` byte for byte, so a duplicate file would add 1,641 lines and no
+`results/results_after_fieldfactors.json` byte for byte, so a duplicate file would add 1,641 lines and no
 information. Reproduce with:
 
 ```bash
 py -m evaluator.local_evaluator --output results_check.json
-diff results_check.json results_after_fieldfactors.json    # expect no output
+diff results_check.json results/results_after_fieldfactors.json    # expect no output
 ```
 
 **Behaviour actually delivered**, driven through the real `AgentBridge` exactly as the browser does:

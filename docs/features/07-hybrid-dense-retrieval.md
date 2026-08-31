@@ -96,7 +96,7 @@ that doesn't cost anything measurable.
 
 ## Measured impact
 
-_results_after_phrase.json → results_after_dense.json_
+_results/results_after_phrase.json → results/results_after_dense.json_
 
 | Metric | Before | After | Delta |
 |---|---|---|---|

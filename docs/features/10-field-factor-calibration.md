@@ -62,7 +62,7 @@ point, not because it is the argmax by a hair.
 
 ## Measured impact
 
-_results_after_dense.json → results_after_fieldfactors.json_
+_results/results_after_dense.json → results/results_after_fieldfactors.json_
 
 | Metric | Before | After | Delta |
 |---|---|---|---|

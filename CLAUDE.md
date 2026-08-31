@@ -39,7 +39,7 @@ Metrics are also reported per scenario — always read the breakdown, not just t
 
 ### Score of record
 
-| Metric | Baseline (`docs/baseline_results.json`) | Current (`results_after_fieldfactors.json`) |
+| Metric | Baseline (`docs/baseline_results.json`) | Current (`results/results_after_fieldfactors.json`) |
 |---|---|---|
 | HitRate@10 | 0.125 | 0.98 |
 | MRR | 0.068034 | 0.864018 |
@@ -98,6 +98,7 @@ py tools/sweep_constants.py --axis A B                # coordinate-descent sweep
 py tools/verify_features.py                          # 90 feature/contract/isolation checks
 py tools/verify_llm.py                               # 96 LLM/env/breaker checks; stubs HTTP, no key
 py tools/score_ratchet.py                            # REFUSES a change that lowers the score
+py tools/build_submission.py                         # rebuild submission/ + prove it byte-identical
 py tools/llm_smoke.py                                # check a real SiliconFlow key end-to-end
 py tools/benchmark_llms.py --offline                 # compare models; --offline uses stubs
 py tools/benchmark_llms.py --models A,B --sessions 50  # ...and score them against a control arm
@@ -188,6 +189,21 @@ starter/env_file.py        .env scaffolding/loading; NEVER imported by the score
 
 Keep the contract surface in `agent.py`; everything else is imported.
 
+**Submission artifacts.** `starter/` is the source of truth; the judged bundle is generated
+from it. `evaluator/local_evaluator.py:12` does `from starter.agent import Agent` and the
+evaluator is not editable, so `starter/` **cannot be renamed** into the layout
+`docs/submission_rules.md` recommends. `tools/build_submission.py` emits that layout instead
+— `submission/agent.py` + `src/` with imports rewritten, plus a four-line `starter/agent.py`
+shim so both import paths resolve to one implementation — and then re-runs all 200 sessions
+against the bundle, requiring byte-identical output. `docs/submission_report.md` is the
+authored report and becomes `submission/README.md` on build.
+
+```text
+tools/build_submission.py  builds and verifies submission/
+docs/submission_report.md  the required report; the bundle's README
+submission/                GENERATED — rebuild it, never edit it
+```
+
 - **Index.** `_build_index` loads all 50k products into an in-memory SQLite **FTS5** table at
   construction. Columns are separately weighted at query time via `bm25()`; `parent_asin` and
   `price` are `UNINDEXED` (price is a numeric filter, not a search term).
@@ -213,7 +229,7 @@ Keep the contract surface in `agent.py`; everything else is imported.
   *requirement* — and **slot-aware questioning**, retiring the attribute for any filled slot so we
   stop asking for what we were already told. That branch
   is **unreachable while scoring** — every evaluator reply is claimed by an earlier regex — and the
-  proof is that a full run with it in place is byte-identical to `results_after_fieldfactors.json`.
+  proof is that a full run with it in place is byte-identical to `results/results_after_fieldfactors.json`.
   Widen the correction cues or the extended colour/material vocabularies freely; they cannot move
   the score. Do **not** widen `COLOR_RE`/`MATERIAL_RE` themselves — those run on evaluator messages.
 - **Dual-track routing.** If any constraint has been detected the session is on the *buying* track:
@@ -389,7 +405,7 @@ at rank 1, because the phrase and dense routes deliberately bypass the `AND` fil
 (`docs/features/12-intent-override.md`). Features 11 and 12 clear **all** of `SLOTS` on an
 `OVERRIDE_RE` match and let that message refill them — colour/material (fires in 21 of 30 override
 sessions) and `price_max` (0 of 30 here). Both are byte-identical to
-`results_after_fieldfactors.json`: zero deltas, not small ones. **Do not quote either as a gain**,
+`results/results_after_fieldfactors.json`: zero deltas, not small ones. **Do not quote either as a gain**,
 and note the `price_max` clear is **unmeasured rather than proven harmless** — it never fires on the
 public set. Clearing a filter only widens the pool, so it cannot *exclude* the target the way the
 rejected variants below can; it can still change the target's *rank* by admitting competitors.
@@ -446,7 +462,7 @@ spends half of it, and exhaustion returns 429 on everything — looks exactly li
 and free pools are rate-limited upstream per model on top of that. Free slugs come and go; if
 the default fails, re-run the benchmark and take the winner. The default configuration is the judged one
 and makes no model call at all; a full run with the model code in place is **byte-identical** to
-`results_after_fieldfactors.json`, sessions array included.
+`results/results_after_fieldfactors.json`, sessions array included.
 
 Enabling requires **both** `SHOPPING_COPILOT_API_KEY` and `SHOPPING_COPILOT_LLM`; neither alone does
 anything, and an unrecognized mode fails closed to `off`. Modes:
@@ -458,8 +474,8 @@ anything, and an unrecognized mode fails closed to `off`. Modes:
 | `expand` | adds retrieval route 5 at weight 0.25 | real but tiny; **unmeasured against the live model** |
 
 Everything fails soft: timeout, HTTP error, bad JSON, or no network returns `None` and the agent
-falls through to the pipeline that scores 0.912205 on its own. Feature 14 adds a **circuit
-breaker** on top: 2 consecutive connection failures, 3 failures of any kind, or 3 consecutive
+falls through to the pipeline that scores 0.912205 on its own. Feature 14
+(`docs/features/14-llm-circuit-breaker.md`) adds a **circuit breaker** on top: 2 consecutive connection failures, 3 failures of any kind, or 3 consecutive
 successes slower than 4.5 s latch the client off for the rest of the process, so a dead endpoint
 costs one timeout rather than one per turn. `.env` is scaffolded and loaded by `webui/` and
 `tools/` (never by the evaluator, which reads `os.environ` directly), a real environment variable
@@ -483,8 +499,8 @@ real counts when enabled, honest zeros when not), latency, and fallback behavior
 A feature is not done until the evaluator has been re-run and the score movement written down.
 
 1. Implement it.
-2. `py -m evaluator.local_evaluator --output results_after_<milestone>.json`
-3. `py tools/score_delta.py <previous>.json results_after_<milestone>.json`
+2. `py -m evaluator.local_evaluator --output results/results_after_<milestone>.json`
+3. `py tools/score_delta.py <previous>.json results/results_after_<milestone>.json`
 4. Write `docs/features/NN-<name>.md` — what/why, approach, the delta table (aggregate **and** all
    four scenarios), known limitations. Template in `docs/features/README.md`.
 5. Commit code and results snapshot together.
@@ -497,9 +513,17 @@ noise; say so rather than claiming a win.
 
 ### Conventions
 
-- Work on `dev`. `main` holds the untouched starter kit.
-- `results.json` is gitignored (scratch). Milestone scores are committed as
-  `results_after_<milestone>.json` — precedent: `results_after_multiroute.json`.
+- **`main` and `dev` are identical and both carry the full work** (`git rev-list
+  --left-right --count main...dev` is `0 0`). The original convention — "work on `dev`, `main`
+  holds the untouched starter kit" — stopped being true well before submission; the starter kit
+  is recoverable from history, not from a branch. Branch off whichever you have checked out.
+- `results.json` is gitignored (scratch). Milestone scores are committed under `results/` as
+  `results/results_after_<milestone>.json` — precedent: `results/results_after_multiroute.json`.
+- **`submission/` is generated, never hand-edited.** `py tools/build_submission.py` rebuilds it
+  from `starter/` and refuses to pass unless a full 200-session run against the bundle is
+  byte-identical to `results/results_after_fieldfactors.json`. Change `starter/` or
+  `docs/submission_report.md`, then rebuild — an edit made directly in `submission/` is
+  destroyed by the next build.
 - `graphify-out/` is gitignored; each clone builds its own graph.
 - Git hooks are **local to each clone**. Every teammate runs the setup below once after cloning.
 
