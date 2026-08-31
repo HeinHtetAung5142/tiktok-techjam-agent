@@ -8,6 +8,15 @@ expecting the starter-kit path finds the same object rather than an ImportError.
 Both names resolve to one implementation in `src/` -- there is no second copy.
 """
 
-from src.agent import Agent
+try:
+    from src.agent import Agent
+except ImportError:  # pragma: no cover -- depends on how the harness was launched
+    # Same fallback as the bundle's root `agent.py`, but this module sits one level down,
+    # so the bundle root is our parent directory. See that file for why it is needed.
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from src.agent import Agent
 
 __all__ = ["Agent"]

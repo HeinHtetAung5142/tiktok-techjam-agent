@@ -110,6 +110,26 @@ from the catalog itself.
 
 ### In the official harness
 
+> **The one thing that must be true: this directory has to be on `sys.path`.** Everything
+> else here follows from it. Either run from inside this directory, or name it explicitly:
+>
+> ```bash
+> PYTHONPATH=/path/to/this/directory python3 -m your_harness      # macOS / Linux
+> ```
+> ```powershell
+> $env:PYTHONPATH = "C:\path\to\this\directory"; py -m your_harness   # Windows
+> ```
+>
+> This matters because `python your_harness.py` puts **the harness's own directory** at
+> `sys.path[0]` — *not* the working directory. So a harness that lives in a different
+> folder cannot import the agent even when launched from in here, and the symptom is
+> `ModuleNotFoundError: No module named 'agent'` (or `'starter'`) before any of our code
+> runs. Setting `PYTHONPATH`, or invoking with `-m` from this directory, fixes it.
+>
+> Once the directory is on the path, both import styles work and the bundle may also be
+> dropped into a larger tree as a subpackage (`from submissions.our_team.agent import
+> Agent`) or loaded by absolute path with `importlib`.
+
 **macOS / Linux** (and any activated venv):
 
 ```bash
@@ -196,7 +216,8 @@ for rank").
 | `python` / `python3` opens the Microsoft Store | The Windows stub. Use `py`, or activate the venv first. |
 | `.venv\Scripts\Activate.ps1 cannot be loaded` | PowerShell execution policy — see Step 1. |
 | `FileNotFoundError: data/catalog.jsonl` | Step 3. Pass an explicit path to `Agent(...)` if it lives elsewhere. |
-| `ModuleNotFoundError: No module named 'src'` | Run from the directory containing `agent.py`, or put that directory on `PYTHONPATH`. |
+| `ModuleNotFoundError: No module named 'agent'` or `'starter'` | This directory is not on `sys.path`. `python harness.py` uses the *harness's* directory, not the working directory — see the note under "In the official harness". Set `PYTHONPATH` to this directory, or invoke with `-m` from inside it. |
+| `ModuleNotFoundError: No module named 'src'` | Same cause, one step later: `agent.py` was found but its directory is not on `sys.path`. Both entry points recover from this automatically; if you still see it, `src/` is missing from the bundle. |
 | `RuntimeError: reset must be called before respond` | `reset(session_id, ...)` must precede `respond(session_id, ...)` for every session id. |
 | The first call takes ~20–30 s | Expected, not a hang. The FTS5 index over 50,000 products and the LSA embeddings are built once at construction, then reused for every session and turn. |
 

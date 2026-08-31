@@ -10,6 +10,19 @@ The implementation lives in `src/`; this file exists so the bundle matches the l
 its import lines. See README.md for setup, reproduction, and the feasibility disclosure.
 """
 
-from src.agent import Agent
+try:
+    from src.agent import Agent
+except ImportError:  # pragma: no cover -- depends on how the harness was launched
+    # `src` is only top-level when this directory is on `sys.path`, which is not
+    # guaranteed: `python /elsewhere/harness.py` puts the *harness* directory at
+    # sys.path[0], not the working directory, so a harness living in another folder
+    # cannot import us even when run from in here. Put ourselves on the path and retry.
+    # This also makes `from <parent>.agent import Agent` work when the bundle is dropped
+    # into a larger tree as a subpackage. No behaviour change when the plain import works.
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from src.agent import Agent
 
 __all__ = ["Agent"]
