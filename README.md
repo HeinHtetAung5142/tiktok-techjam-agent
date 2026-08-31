@@ -1,95 +1,150 @@
-# TechJam Conversational E-Commerce Search Challenge
+# Shopping Copilot — TikTok TechJam 2026
 
-Build an AI shopping agent that asks useful follow-up questions and recommends the customer's hidden target product within at most 10 turns.
+A multi-turn conversational shopping agent that finds a **hidden** target product inside a
+50,000-item catalog, in as few turns as possible, by asking targeted clarifying questions
+and absorbing the answers into a ranked search.
 
-## What You Receive
+**It runs fully offline: no LLM call, no API key, no network access, and no pretrained
+weights loaded from disk.** Retrieval is an in-memory SQLite FTS5 index plus LSA
+embeddings fitted at startup from the catalog itself.
 
-- A frozen catalog of 50,000 products from the `Clothing_Shoes_and_Jewelry` category of Amazon Reviews 2023.
-- 200 labeled public sessions for local development.
-- A weak BM25 starter agent and deterministic local evaluator.
-- The Agent API contract and scoring rules.
+| Metric | Weak BM25 starter | **This agent** |
+|---|---|---|
+| Hit Rate@10 | 0.125 | **0.98** |
+| MRR | 0.068034 | **0.864018** |
+| MTTC (mean turns to convert) | 9.81 | **2.85** |
+| **TechnicalScore** | **0.10671** | **0.912205** |
 
-The organizer keeps 800 additional sessions private for final evaluation.
+Per scenario Hit Rate@10: boundary `1.0` · browsing `0.9875` · buying `0.975` ·
+intent_override `0.9667`. 196 of 200 sessions hit, **162 of them at rank 1**.
 
-## Task
+---
 
-For each session, your agent receives an anonymized preference profile and a short customer message. Raw user IDs, review text, timestamps, and purchase history are never disclosed. On every turn the agent may:
+## 1. Project overview
 
-- ask a natural clarification question in `message` and identify one requested field in `ask_attribute`;
-- return a ranked list of catalog `parent_asin` values, best first — the contract allows up to 100
-  (`recommendations.maxItems`), of which only the first 10 valid, unique, in-catalog ids are scored
-  (`evaluator/local_evaluator.py:95-109`);
-- do both in the same response.
+### The problem
 
-The session ends when the target product appears in the scored Top 10 or after turn 10. Sessions cover Buying, Browsing, Intent Override, and Boundary behavior.
+Each session the agent receives an anonymized `user_profile` and a simulated customer
+message. On every turn it may ask one clarifying question, return a ranked list of
+`parent_asin` values, or both. The session ends the moment the target appears in the
+scored Top 10, or after turn 10. Only exact `parent_asin` equality counts.
 
-## Download the Catalog
+```text
+TechnicalScore = 0.50 × HitRate@10 + 0.30 × MRR + 0.20 × Efficiency
+Efficiency     = clip((11 − MTTC) / 10, 0, 1)
+```
 
-Download `catalog.jsonl.gz` from the GitHub Release attached to this repository, then run:
+That weighting is the priority order: **find it at all → rank it near the top → get there
+in fewer turns.**
+
+### How it works
+
+Six modules, no network on the scored path:
+
+```text
+starter/agent.py            orchestration + the official reset()/respond() contract
+starter/retrieval.py        FTS5 index, six query routes, weighted RRF fusion
+starter/dialog_state.py     per-session slots, evidence accumulation, question policy
+starter/ranking.py          IDF coverage + phrase reranking over the fused pool
+starter/dense_retrieval.py  offline LSA (TF-IDF + Truncated SVD) embeddings
+starter/facets.py           generic attribute facets — free-form input only
+```
+
+The four ideas that produced most of the score:
+
+**Ask, then absorb.** The simulated customer discloses a constraint only when you name the
+attribute it belongs to, so we ask on every turn — a question is free, since
+recommendations are scored regardless. `other` leads the ask order because it is the only
+attribute that cannot whiff. Every disclosure accumulates as retrieval evidence, oldest
+first, so the query spans the whole conversation rather than the latest message.
+
+**Multi-route retrieval, then rerank.** Up to six routes run per turn — whole-catalog
+keyword, category-scoped, up to 12 IDF-weighted exact-phrase routes, a dense LSA route,
+and two free-form-only routes — merged by weighted Reciprocal Rank Fusion. Fusion does not
+decide the final order; it generates a 120-candidate pool that a reranker reorders on
+IDF-weighted term coverage and intact-phrase matching. The premise is that a shopper
+quotes the language of the product they want, and the catalog is where that language came
+from.
+
+**Trade turns for rank.** The evaluator freezes the target's rank the moment it appears in
+the Top 10, so surfacing it early at a bad rank is a *cost*. One turn of delay costs
+0.0001 of TechnicalScore while one unit of reciprocal rank is worth 0.0015 — so turns 1–2
+disclose a single recommendation and the list widens as evidence arrives
+(`DISCLOSURE_SCHEDULE = (1, 1, 4, 8, 10)`).
+
+**Fail soft, everywhere.** A raised exception or malformed output is scored as an outright
+miss, so the reranker, the dense route, the phrase routes and the optional model each have
+their own `try/except`: a fault costs that component only, never the turn.
+
+### Reading the evaluator was worth more than any model
+
+The simulator's disclosable pool is **four constraints total** (`hard_constraints =
+cleaned[:2]`, `soft_preferences = cleaned[2:4]`), and it returns at most two per turn — so
+two `other` questions exhaust the customer completely by turn 3. No dialog-side strategy
+can beat that, and no session needs to run past turn 4. Given fixed and complete evidence
+by turn 3, **the only remaining lever in the whole system is ranking quality.** That
+conclusion shaped every feature after it, and it came from reading
+`evaluator/local_evaluator.py`, not from tuning.
+
+---
+
+## 2. Setup and installation
+
+**Python 3.10+.** Verified on **3.14.7** and **3.12.0**; 3.10/3.11 are the declared floor
+but untested — treat them as expected-to-work.
+
+### Step 1 — Install dependencies (required)
+
+```bash
+pip install -r requirements.txt
+```
+
+This installs `numpy`, `scikit-learn` and `scipy`, used by the dense-retrieval route. They
+are the project's **only** third-party dependencies; everything else is standard library.
+
+**This step is required, and the failure mode is quiet.** `CatalogIndex._build_dense_index`
+imports lazily inside a broad `try/except` so a missing stack degrades to sparse-only
+retrieval rather than crashing. The only symptom is one line on stderr:
+
+```text
+[dense_retrieval] disabled: ModuleNotFoundError("No module named 'numpy'")
+```
+
+Miss that line and the run looks normal while scoring a different agent — sparse-only
+returns **0.909858** against the **0.912205** of record.
+
+### Step 2 — Download the catalog
+
+Download `catalog.jsonl.gz` from the GitHub Release attached to this repository, verify it
+against the published `SHA256SUMS`, then:
 
 ```bash
 gzip -dk catalog.jsonl.gz
 mv catalog.jsonl data/catalog.jsonl
 ```
 
-Verify the downloaded file using the published `SHA256SUMS` file.
+`data/catalog.jsonl` must exist with 50,000 rows before anything will run.
 
-## Setup and Reproduction
+### Step 3 — Nothing else
 
-**Python 3.10 or later.** Verified here on **3.14.7** and **3.12.0**. 3.10 and 3.11 are the declared
-floor but have not been run — treat them as expected-to-work, not tested.
+No environment variables. No API keys. No network access. No config file.
 
-### 1. Install dependencies — required
+> **Windows note.** `python` and `python3` often resolve to the Microsoft Store stub and
+> fail. Use the real launcher — `py` — which is what every command below assumes. On
+> macOS/Linux substitute `python3`; the module paths are identical.
 
-```bash
-pip install -r requirements.txt
-```
+---
 
-This installs `numpy`, `scikit-learn`, and `scipy` (a transitive dependency of scikit-learn,
-pinned to the version this agent was verified against). They are used by the dense-retrieval
-route in `starter/dense_retrieval.py`.
+## 3. Steps to reproduce your results
 
-**The agent still imports and runs without them — which is exactly why this step is required.**
-`CatalogIndex._build_dense_index` imports `DenseIndex` lazily inside a broad `try/except`
-(`starter/retrieval.py:227-242`) so a missing or broken stack degrades to sparse-only retrieval
-instead of taking the agent down. The only symptom is a single line on stderr:
-
-```text
-[dense_retrieval] disabled: ModuleNotFoundError("No module named 'numpy'")
-```
-
-Miss that line and the run looks entirely normal while scoring a different agent. Measured on the
-200-session public set, sparse-only returns TechnicalScore **0.909858** against the **0.912205** of
-record — a one-session difference, small enough to be mistaken for noise.
-
-Versions are pinned exactly. If you install different versions the run may still work, but it is
-no longer the configuration we validated.
-
-### 2. Download the catalog
-
-Follow *Download the Catalog* above so `data/catalog.jsonl` exists (50,000 rows) before running.
-
-### 3. Run the evaluator — one command
-
-```bash
-python3 -m evaluator.local_evaluator
-```
-
-On Windows, `python` and `python3` may resolve to the Microsoft Store stub and fail. Use the real
-launcher instead — the module path is identical:
+### The one command that matters
 
 ```bash
 py -m evaluator.local_evaluator
 ```
 
-Writes per-session results and aggregate metrics to `results.json`, and prints the aggregate plus
-per-scenario breakdown to stdout. No environment variables, no API keys, no network access
-required — see *Model Choice and Cost* below.
-
-### Expected result
-
-A full 200-session run takes roughly **23 seconds** (23.2–23.4 s across three consecutive runs) and
-is deterministic — identical code always produces an identical score. Our agent reproduces:
+Writes per-session results and aggregate metrics to `results.json` and prints the
+aggregate plus the per-scenario breakdown. Expect:
 
 | Metric | Value |
 |---|---|
@@ -98,192 +153,230 @@ is deterministic — identical code always produces an identical score. Our agen
 | MTTC | 2.85 |
 | **TechnicalScore** | **0.912205** |
 
-Per-scenario Hit Rate@10: boundary 1.0 · browsing 0.9875 · buying 0.975 · intent_override 0.9667.
-The committed snapshot of this run is `results_after_fieldfactors.json`.
+**Runs are deterministic.** `materialize_hidden_fields` regenerates intent cards with a
+seeded RNG, so identical code always scores identically, bit for bit. A changed score means
+a changed agent — never run-to-run noise. The committed snapshot of this exact run is
+`results_after_fieldfactors.json`.
 
-For reference, the unmodified weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
-MTTC `9.81` — see `docs/baseline_results.json`.
+### Verifying you reproduced it exactly
 
-Edit `starter/agent.py` to implement your system. Do not edit the evaluator or public labels when
-reporting your local score.
+```bash
+py tools/score_ratchet.py
+```
 
-## Agent Interface
+This is the project's merge rule — **TechnicalScore may rise or stay level, never fall** —
+and it is the fastest way to confirm your run matches ours. It exits non-zero if the score
+fell, and distinguishes *byte-identical* (the sessions array matches exactly) from merely
+*score-equal*, because offsetting session movements can hide a regression that the
+800-session private set would not forgive.
+
+### The full test suite
+
+```bash
+py tools/verify_features.py   # 90 feature / contract / isolation checks
+py tools/verify_llm.py        # 96 optional-model checks; stubs HTTP, needs no key
+```
+
+Both exit non-zero on a regression and need neither network nor credentials. Two
+robustness checks report as **XFAIL** — documented known gaps (see §4), not regressions.
+
+`verify_features.py` includes the invariant the whole design rests on: it asserts that a
+full scored run makes **566 `observe()` calls and 0 `_observe_freeform` calls**, proving
+the human-input code paths are unreachable while scoring.
+
+### Other useful commands
+
+```bash
+py tools/feasibility_report.py                    # regenerate latency / token / cost tables
+py tools/score_delta.py <before.json> <after.json>  # markdown delta table
+py tools/sweep_constants.py --list                # show the tunable axes
+py -m webui.server                                # optional local UI, http://127.0.0.1:8000
+```
+
+### Measured latency
+
+Latency is **not** deterministic — unlike the score, it moves with machine load and cache
+state, and varies substantially across hardware. On the development machine (Windows 11,
+Python 3.14.7) across several runs this session:
+
+| Stage | Time |
+|---|---|
+| `Agent()` construction (FTS5 index + LSA embeddings) | **21–30 s**, one-time at startup |
+| `respond()` — mean | **58–144 ms** |
+| `respond()` — p95 | **131–324 ms** |
+| Full 200-session run, end to end | **~25–40 s** |
+
+Construction is paid once per process, never per session or per turn. Earlier runs on a
+faster machine recorded ~6 s construction and ~31 ms mean; the spread is hardware, not
+behaviour. **Regenerate the numbers for your own machine rather than trusting these** —
+`py tools/feasibility_report.py`.
+
+### Model choice and cost — our disclosure
+
+**The submitted configuration makes no model call.**
+
+| Item | Value |
+|---|---|
+| LLM / external API | **None** |
+| Network access required | **None** — runs fully offline |
+| API keys / environment variables | **None required** |
+| Estimated model cost | **$0.00** |
+| Reported token usage | `0` prompt, `0` completion — honestly zero, not unreported |
+
+An optional hosted model exists in the repo (`starter/llm.py`, OpenAI-compatible, stdlib
+`urllib.request`, no added dependency). It requires **both** `SHOPPING_COPILOT_API_KEY`
+and `SHOPPING_COPILOT_LLM` — neither alone does anything, and an unrecognized mode fails
+closed to `off`. No key is in the repo; configuration is environment-only.
+
+Because official judging may disable the network, the fallback was **measured, not
+asserted**: a full run with the model configured *and every socket raising* produces a
+results document byte-identical to `results_after_fieldfactors.json`. Setup:
+`docs/LLM_SETUP.md`. Rationale and measurements: `docs/features/13-optional-llm.md`.
+
+---
+
+## 4. Limitations, and what we would improve with more time
+
+### What we know is wrong
+
+**The four remaining misses are information-theoretically unreachable, not a retrieval
+failure.** `public_0020`, `public_0087`, `public_0144`, `public_0174` disclose constraints
+shared with thousands of products — `public_0087` offers only "cotton" (df 9,775),
+"100% Cotton" (3,770), "Imported" (15,300), "Button closure" (2,391). Nothing lexical *or*
+dense separates a target from 3,000 items when the evidence is identical across all of
+them. We verified this rather than assuming it: a conjunction route narrowing to 100
+candidates still could not order them, and `public_0020` moves from rank 15 to 14 when the
+hard filter is removed entirely. **A better retriever cannot fix these.**
+
+**The real headroom is ranking precision, and we did not get to it.** Of 196 hits, 162 land
+at rank 1 and **34 land at ranks 2–10** — 30 of those on turns 3–4, exactly where the
+disclosure schedule widens 1 → 4 → 8. Promoting all 34 to rank 1 is worth **+0.0348**,
+more than three times the entire miss pool (+0.0160). The diagnosed cause is real and
+untried: `Reranker._coverage` measures recall with **no length normalization**. It asks
+*how much of the customer's evidence is in this product* and never *how much of this
+product is the customer's evidence*, so a sprawling 700-token listing that happens to
+contain "100% Cotton" among forty other features scores identically to a focused listing
+where those are the whole product. **Adding a precision term is the single highest-value
+thing left**, and the realistic ceiling with the current miss set is ~0.947.
+
+**`respond()` has no broad exception guard.** `observe(None, 1)` raises `TypeError`, and a
+non-`int` `turn` raises too. The public set never triggers either and the organizer's
+evaluator catches exceptions anyway — so this is insurance against a stricter hidden
+harness, not a known loss. It is recorded as a decision, not a discovery, and reported as
+XFAIL by the test suite.
+
+**Turns 1–2 return a single recommendation.** Deliberate and contract-legal (it buys rank,
+see above), but it is thin UX and reads oddly in a live demo.
+
+### What we tried that did not work
+
+Recording these matters as much as the wins:
+
+- **Personalization from `user_profile` is worthless here, measured across all 200
+  sessions.** `purchase_frequency` is a constant; `category_bucket` is a constant;
+  `average_prior_rating` and `rating_style` describe the *reviewer's temperament*, not the
+  product. The only varying field, `preference_tags`, is degenerate — `fit` appears in
+  163/200. A field in over half the sessions cannot separate one target from 50,000.
+- **Dense retrieval shipped flat.** It earns its keep as a *route*, but blending LSA
+  similarity into the reranker regressed MRR monotonically at every nonzero weight tested.
+  LSA is a smoothed compression of the same term statistics coverage already uses.
+- **Blending the fused BM25 order back in as a ranking prior cost 0.03–0.04.**
+
+### Known rough edges in the free-form (demo) path
+
+These cannot affect the score — the code is unreachable while scoring — but they are real:
+
+- **Facet demotion only fires on an explicit opposite assertion.** A women's dress whose
+  title never says "women" is not demoted, so one still reaches rank 9 on a men's query.
+  Fixing it needs a category signal, not a title token.
+- **Exclusions over-fire on noisy material fields.** "skinny jeans, not polyester" returns
+  a tank top first, because most stretch jeans list polyester in the blend.
+- **The facet vocabulary is curated, not mined** — ten groups covering the common apparel
+  axes. A value nobody listed falls back to ordinary keyword evidence.
+
+### Given more time
+
+1. **Add a precision term to `_coverage`** (or normalize by document length). The one open
+   lever with a real mechanism behind it, worth up to +0.0348. Measure it; expect a handful
+   of sessions, not all 34.
+2. **Move the filler-word fix onto the scored path.** On a live free-form query,
+   `under 50 dollars` carried 33% of the query's total IDF mass on words describing no
+   product — `dollars` (IDF 6.79) outweighed `tshirt` (4.73). We fixed this for human input
+   only; whether it helps the *simulator's* disclosures is an unmeasured, plausible win.
+3. **Harden `respond()`** against malformed input, then re-run the ratchet to confirm
+   0.912205 is unchanged.
+4. **Mine the facet vocabulary from the catalog** instead of curating it, so new attribute
+   groups appear without anyone editing a dictionary.
+5. **Paraphrase-proof the dialog layer.** The spec warns the organizer may add natural-
+   language paraphrasing, and the private set is 4× ours. Our regexes model the mechanism
+   ("ask a targeted question, absorb the answer") rather than literal strings, but the
+   free-form path has never been tested against a paraphrasing simulator — only against
+   humans typing into the WebUI.
+
+### The one thing we would keep
+
+Every feature in `docs/features/` carries a measured before/after delta, including the flat
+and negative results. That discipline is why we could say "dense retrieval is flat, ship it
+as a route only" instead of arguing about it, and why the score never silently regressed
+across 16 features. `tools/score_ratchet.py` now enforces it mechanically.
+
+---
+
+## Agent interface
 
 ```python
 class Agent:
-    def reset(self, session_id: str, user_profile: dict) -> None:
-        ...
+    def reset(self, session_id: str, user_profile: dict) -> None: ...
 
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         return {
             "message": "Do you have a material preference?",
             "ask_attribute": "material",
-            "recommendations": [
-                {"parent_asin": "B000..."},
-                {"parent_asin": "B001..."}
-            ],
-            "usage": {"prompt_tokens": 120, "completion_tokens": 30}
+            "recommendations": [{"parent_asin": "B000..."}, {"parent_asin": "B001..."}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
 ```
 
-`ask_attribute` is one of `category`, `material`, `color`, `size`, `style`, `brand`, `budget`, `feature`, `use_case`, `other`, or `null`. See `docs/agent_api_contract.json`.
+`ask_attribute` is one of `category`, `material`, `color`, `size`, `style`, `brand`,
+`budget`, `feature`, `use_case`, `other`, or `null`. Recommendations are ordered best-first;
+only the first 10 valid, unique, in-catalog ids are scored. See
+`docs/agent_api_contract.json`.
 
-## Technical Metrics
-
-- **Hit Rate@10:** fraction of sessions that find the target within 10 turns.
-- **MRR:** mean reciprocal rank of the target; a miss contributes zero.
-- **MTTC:** mean first-hit turn; a miss is assigned turn 11.
-- **Reported token usage:** prompt and completion tokens returned by the team's model client.
+## Repository layout
 
 ```text
-TechnicalScore = 0.50 × HitRate@10 + 0.30 × MRR + 0.20 × Efficiency
-Efficiency = clip((11 - MTTC) / 10, 0, 1)
-```
+starter/                    the submitted agent (see §1)
+requirements.txt            pinned dependencies — install before running
 
-Only exact `parent_asin` equality produces a hit. Core metrics are also reported by scenario.
-
-## Model Choice and Cost
-
-Organizer policy: teams may use any legally accessible LLM API or local model, must manage their own
-credentials, and must never commit API keys. Model choice, estimated cost, token usage, and latency
-must be disclosed. Token usage is a feasibility metric, not part of the core technical score.
-
-### Our disclosure
-
-**The submitted configuration makes no model call.** There is an optional hosted model in the
-repo, and it is off unless two environment variables are both set — which they are not in the
-configuration you run.
-
-| Item | Value (submitted default) |
-|---|---|
-| LLM / external API | **None** — no API calls of any kind |
-| Network access required | **None.** Runs fully offline |
-| API keys / environment variables | **None required.** `SHOPPING_COPILOT_API_KEY` + `SHOPPING_COPILOT_LLM` enable the optional route; unset by default |
-| Estimated model cost | **$0.00** — nothing is called, and the optional model is a permanently-free tier |
-| Reported token usage | `0` prompt, `0` completion — honestly zero, not unreported |
-
-Retrieval is entirely local: an in-memory SQLite **FTS5** index plus offline **LSA** embeddings
-(TF-IDF + Truncated SVD) computed at construction from the catalog itself. Nothing is downloaded
-at runtime and no pretrained model weights are loaded from disk.
-
-#### The optional model
-
-`starter/llm.py` can call `inclusionai/ling-3.0-flash-fin:free` on OpenRouter's OpenAI-compatible
-endpoint. It is standard-library `urllib.request`, so it adds no dependency, and it requires
-**both**
-`SHOPPING_COPILOT_API_KEY` and `SHOPPING_COPILOT_LLM` — neither alone does anything, and an
-unrecognized mode fails closed to `off`. Both may live in a gitignored `.env`, which the WebUI
-and the tools scaffold and load (the evaluator never reads it, and a real environment variable
-always wins). Modes are `off` (default), `freeform` (manual-testing UI
-only, unreachable while scoring) and `expand` (adds one low-weight retrieval route; experimental
-and unmeasured against the live model). No key is in the repo; configuration is environment-only.
-The variable names are historical: `starter/llm.py` speaks plain OpenAI-compatible chat
-completions, so any such endpoint works — OpenRouter (the default), a local Ollama,
-SiliconFlow — with no code change. **Setup instructions: `docs/LLM_SETUP.md`.** Rationale and measurements:
-`docs/features/13-optional-llm.md`.
-
-Repeated failure or sustained slowness latches the client off entirely (2 connection failures, 3
-failures of any kind, or 3 responses slower than 4.5 s), so an unreachable endpoint costs one
-timeout rather than one per turn — see `docs/features/13-optional-llm.md`.
-
-Because official judging may disable network access, the fallback was measured rather than
-asserted. A full 200-session run with `expand` configured **and every socket raising** produces a
-results document that is byte-identical to `results_after_fieldfactors.json` — sessions array
-included. Every model failure (timeout, HTTP error, bad JSON, no network) returns `None` and the
-agent falls through to the offline pipeline, which scores 0.912205 on its own.
-
-### Measured latency
-
-From the 200-session run (**566** `respond()` calls — 196 sessions end on their hit turn, 4 misses
-run the full 10), measured on the development machine: Windows 11, Python 3.14.7. Regenerate these
-numbers at any time with:
-
-```bash
-py tools/feasibility_report.py
-```
-
-| Stage | Time |
-|---|---|
-| `Agent()` construction (FTS5 index + LSA embeddings) | **~6 s**, one-time at startup |
-| `respond()` — mean | **~31 ms** |
-| `respond()` — median | **~25 ms** |
-| `respond()` — p95 | **~70 ms** |
-| `respond()` — max | 138–153 ms |
-| Full 200-session run, end to end | **~23 s** |
-
-Construction cost is paid once per process, not per session or per turn.
-
-Unlike the score, **these timings are not deterministic** — they move with machine load and cache
-state. Figures above are typical of four consecutive runs on the development machine; the mean was
-stable within ~1 ms across them (30.6–31.7 ms) and construction within ~0.3 s (5.7–6.0 s), while the
-single worst-case turn ranged 138–153 ms. Treat them as representative, not exact. The score, by
-contrast, reproduces bit-for-bit.
-
-## Files
-
-Our agent — the submitted system:
-
-```text
-starter/agent.py            orchestration + the official reset()/respond() contract
-starter/retrieval.py        FTS5 index, query routes, RRF fusion
-starter/dialog_state.py     per-session slots, evidence accumulation, question policy
-starter/ranking.py          IDF coverage + phrase reranking over the fused candidate pool
-starter/dense_retrieval.py  offline LSA (TF-IDF + Truncated SVD) embeddings
-requirements.txt            pinned dependencies -- install before running
-```
-
-How it was built, feature by feature, each with a measured before/after score delta:
-
-```text
-docs/features/01-dual-track-intent-routing.md   Buying vs Browsing routing
-docs/features/02-multi-route-retrieval.md       keyword + category routes, RRF fusion
-docs/features/03-clarification-loop.md          targeted questions, evidence accumulation
-docs/features/04-semantic-reranking.md          reranking the fused candidate pool
-docs/features/05-rank-vs-turn-arbitrage.md      trading turns for rank
-docs/features/06-phrase-retrieval.md            exact-phrase routes
-docs/features/07-hybrid-dense-retrieval.md      dense LSA route (shipped flat, documented)
-docs/features/08-feasibility-disclosure.md      latency / token / cost instrumentation
-docs/features/09-optimization-headroom.md       where the remaining points are, and what is closed
-docs/features/10-field-factor-calibration.md    field factors corrected to match the evidence source
-docs/demo-script.md                             narration script for the demo video
-results_after_fieldfactors.json                 committed snapshot of the score of record
-```
-
-Development tooling (not part of the agent, not needed to reproduce the score):
-
-```text
+tools/score_ratchet.py      refuses a change that lowers the score
+tools/verify_features.py    90 feature / contract / isolation checks
+tools/verify_llm.py         96 optional-model checks; stubs HTTP, needs no key
+tools/feasibility_report.py regenerates the latency / token / cost tables
 tools/score_delta.py        markdown before/after delta table for a feature doc
-tools/feasibility_report.py regenerates the latency / token / cost tables above
-tools/sweep_constants.py    coordinate-descent sweep over the agent's tuned constants
-tools/git-hooks/post-merge  rebuilds the knowledge graph after a merge (setup in CLAUDE.md)
-webui/                      optional local web UI for hand-driven sessions; stdlib only,
-                            adds no dependency, delete the directory to remove it entirely
-                            (webui/README.md)
+tools/sweep_constants.py    coordinate-descent sweep over the tuned constants
+tools/llm_smoke.py          checks a real API key end to end
+tools/benchmark_llms.py     compares candidate models on the free-form path
+
+docs/features/              every feature, each with a measured score delta (01–13, 15, 16;
+                            14 is the model circuit breaker, written up in CLAUDE.md)
+docs/LLM_SETUP.md           optional-model setup, per provider
+docs/demo-script.md         narration script for the demo video
+results_after_*.json        committed milestone snapshots
+
+webui/                      optional local UI for hand-driven sessions; stdlib only,
+                            adds no dependency, delete the directory to remove it
+
+data/catalog.jsonl          50,000 frozen products (downloaded separately)
+data/public_set.jsonl       200 labeled development sessions
+evaluator/local_evaluator.py  organizer-provided simulator and scorer — unmodified
+docs/competition_specification.md · submission_rules.md · agent_api_contract.json ·
+docs/evaluation_config.json · docs/baseline_results.json — organizer-provided, unmodified
 ```
 
-Organizer-provided, unmodified:
+## Data source
 
-```text
-data/catalog.jsonl                50,000 frozen products (downloaded separately)
-data/public_set.jsonl             200 labeled development sessions
-docs/competition_specification.md participant rules and evaluation protocol
-docs/submission_rules.md          participant submission requirements
-docs/agent_api_contract.json      machine-readable Agent contract
-docs/evaluation_config.json       scoring configuration
-docs/baseline_results.json        reproducible weak-starter reference score
-evaluator/local_evaluator.py      public-set simulator and scorer
-```
-
-## Judging and Submission Policy
-
-- Participant submission requirements: `docs/submission_rules.md`
-- Evaluation protocol and metrics: `docs/competition_specification.md`
-
-Organizer-side judging runbooks referenced in the original starter README
-(`organizer/JUDGING_RUNBOOK.md` and similar) are not distributed to participants and are not
-present in this repository.
-
-## Data Source
-
-The catalog and sessions are derived from Amazon Reviews 2023 by McAuley Lab, UCSD. See `DATA_ATTRIBUTION.md` before using or redistributing the data.
-Sessions are sampled deterministically from the official Clothing 5-core leave-last-out split and joined to the frozen catalog.
+Catalog and sessions derive from **Amazon Reviews 2023** by McAuley Lab, UCSD. See
+`DATA_ATTRIBUTION.md` before using or redistributing. Sessions are sampled deterministically
+from the official Clothing 5-core leave-last-out split and joined to the frozen catalog.
+The dataset is read-only: we never modify the catalog or invent ASINs, and agent code never
+reads `ground_truth`.
